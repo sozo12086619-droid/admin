@@ -270,13 +270,14 @@ with st.sidebar:
         "オフライン簡易分類（APIキー不要）": "offline",
     }[choice]
 
-    if provider == "claude":
+   if provider == "claude":
         model = st.selectbox(
             "モデル", ["claude-haiku-4-5", "claude-sonnet-5"],
             help="haiku は安くて速い。精度が欲しい時だけ sonnet に。",
         )
     elif provider == "gemini":
-    model = st.selectbox("モデル", ["gemini-3.6-flash"])
+        model = st.selectbox("モデル", ["gemini-3.6-flash"])
+    else:
         model = None
         st.info(".env に APIキーを入れると AI分類が使えるで。今はルールベースで動いてる。")
 
