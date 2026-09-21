@@ -19,7 +19,7 @@ import dateparse
 from db import CATEGORIES
 
 CLAUDE_MODEL = "claude-haiku-4-5"      # 精度が欲しいときは "claude-sonnet-5"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
 
