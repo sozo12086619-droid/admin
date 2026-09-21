@@ -276,8 +276,7 @@ with st.sidebar:
             help="haiku は安くて速い。精度が欲しい時だけ sonnet に。",
         )
     elif provider == "gemini":
-        model = st.selectbox("モデル", ["gemini-1.5-flash", "gemini-2.0-flash"])
-    else:
+    model = st.selectbox("モデル", ["gemini-3.6-flash"])
         model = None
         st.info(".env に APIキーを入れると AI分類が使えるで。今はルールベースで動いてる。")
 
