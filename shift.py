@@ -325,7 +325,7 @@ def extract(
             m = model or "claude-haiku-4-5"
             return to_items(read_with_claude(image_bytes, person_name, m, hint), workplace), m
         if provider == "gemini":
-            m = model or "gemini-3.6-flash"
+    m = model or "gemini-1.5-flash"
             return to_items(read_with_gemini(image_bytes, person_name, m, hint), workplace), m
         raise RuntimeError(
             "画像の読み取りにはAPIキーが必要やで。"
