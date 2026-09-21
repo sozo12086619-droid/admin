@@ -56,40 +56,27 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
 # ---------------------------------------------------------------------------
 # CSS（見た目の指定をまとめて流し込む）
 # ---------------------------------------------------------------------------
-# st.container(border=True) で作った枠に、CSSで「カードらしさ」を付けている。
-# data-testid は Streamlit が各部品に付けてる目印。これを狙い撃ちして装飾する。
-# ---------------------------------------------------------------------------
-# テーマ（色）の設定 — ここを変えればアプリ全体の色が変わる
-# ---------------------------------------------------------------------------
-# config.toml を使わず、CSSをその場で流し込んで色を指定する方式。
-# 利点: このファイル1つ配れば見た目もそのまま再現できる
-# 欠点: Streamlit本体のテーマ設定より後から上書きする形になるので、
-#       文字色まで自分で指定してやらんと「白背景に白文字」になる箇所が出る。
-#       そのため下で --app-text を全体に効かせている。
-
 THEME = {
-    "bg":      "#F4F1EA",   # 背景：文庫本のような温かみのある生成り色
-    "accent":  "#3B6E5B",   # アクセント：目に優しい落ち着いたフォレストグリーン
-    "accent_d": "#2D5446",  # ボタンホバー用（濃い緑）
-    "card":    "#FAF8F5",   # カード枠：ふんわりしたオフホワイト
-    "text":    "#2B2B2A",   # 文字色：真っ黒を避けた柔らかな墨色
-    "muted":   "#767571",   # 補足文字：落ち着いたグレー
-    "border":  "#E2DED4",   # 枠線：目立たない淡いベージュ
+    "bg":       "#F4F1EA",   # 背景：文庫本のような温かみのある生成り色
+    "accent":   "#3B6E5B",   # アクセント：目に優しい落ち着いたフォレストグリーン
+    "accent_d": "#2D5446",   # ボタンホバー用（濃い緑）
+    "card":     "#FAF8F5",   # カード枠：ふんわりしたオフホワイト
+    "text":     "#2B2B2A",   # 文字色：真っ黒を避けた柔らかな墨色
+    "muted":    "#767571",   # 補足文字：落ち着いたグレー
+    "border":   "#E2DED4",   # 枠線：目立たない淡いベージュ
 }
-# CSSの中で使う「変数」を先に定義しておく。
-# :root に --名前: 値 を書いておくと、以降 var(--名前) で呼び出せる。
-# こうしておくと色を1か所で管理できる（CSSカスタムプロパティという仕組み）。
+
 st.markdown(
     f"""
     <style>
       :root {{
-        --app-bg:     {THEME["bg"]};
-        --app-accent: {THEME["accent"]};
+        --app-bg:       {THEME["bg"]};
+        --app-accent:   {THEME["accent"]};
         --app-accent-d: {THEME["accent_d"]};
-        --app-card:   {THEME["card"]};
-        --app-text:   {THEME["text"]};
-        --app-muted:  {THEME["muted"]};
-        --app-border: {THEME["border"]};
+        --app-card:     {THEME["card"]};
+        --app-text:     {THEME["text"]};
+        --app-muted:    {THEME["muted"]};
+        --app-border:   {THEME["border"]};
       }}
     </style>
     """,
@@ -104,11 +91,8 @@ st.markdown(
       section[data-testid="stMain"] {
         background-color: var(--app-bg) !important;
       }
-      /* 上部のツールバー帯も背景になじませる */
       header[data-testid="stHeader"] { background: transparent !important; }
 
-      /* 背景を明るい色に固定するので、文字色も明示的に濃くしておく。
-         これをやらんと、端末がダークモードのとき白背景に白文字になってまう */
       .stApp, .stApp p, .stApp span, .stApp li, .stApp label,
       .stApp h1, .stApp h2, .stApp h3, .stApp div[data-testid="stMarkdownContainer"] {
         color: var(--app-text);
@@ -134,7 +118,6 @@ st.markdown(
       }
 
       /* ══ ボタン ══ */
-      /* type="primary" のボタンをエメラルドグリーンに */
       .stButton button[kind="primary"],
       .stDownloadButton button[kind="primary"] {
         background-color: var(--app-accent) !important;
@@ -146,7 +129,6 @@ st.markdown(
         background-color: var(--app-accent-d) !important;
         border-color: var(--app-accent-d) !important;
       }
-      /* 普通のボタン（完了・削除）は白地に緑の枠 */
       .stButton button[kind="secondary"] {
         background-color: var(--app-card) !important;
         border: 1px solid var(--app-border) !important;
@@ -169,14 +151,12 @@ st.markdown(
       .stTextInput input:focus, .stTextArea textarea:focus {
         border-color: var(--app-accent) !important;
       }
-      /* タブ風ボタン（segmented_control）の選択中をアクセント色に */
       div[data-testid="stButtonGroup"] button[aria-checked="true"],
       div[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] {
         background-color: var(--app-accent) !important;
         border-color: var(--app-accent) !important;
         color: #fff !important;
       }
-      /* タブ（入力／タイムライン／原文ログ）の下線もアクセント色に */
       .stTabs [aria-selected="true"] { color: var(--app-accent) !important; }
       .stTabs [data-baseweb="tab-highlight"] { background-color: var(--app-accent) !important; }
 
@@ -193,7 +173,6 @@ st.markdown(
       .day-rel    { font-size: 12px; font-weight: 700; padding: 2px 10px;
                     border-radius: 999px; background: #ECFDF5;
                     color: var(--app-accent-d) !important; }
-      /* 今日だけ塗りつぶしで強調 */
       .day-rel.is-today { background: var(--app-accent) !important; color: #fff !important; }
       .day-count  { font-size: 11px; color: var(--app-muted) !important; margin-left: auto; }
 
@@ -223,8 +202,6 @@ st.markdown(
       .item-title { font-size: 15px; font-weight: 600; }
       .item-meta  { font-size: 12px; color: var(--app-muted) !important; margin-top: 4px; }
 
-      /* カテゴリの色付きラベル。文字は必ず白にしたいので !important を付ける
-         （上で .stApp span の文字色を指定しているため、それに負けないように） */
       .cat-pill {
         display: inline-block; font-size: 10.5px; font-weight: 800;
         padding: 2px 9px; border-radius: 999px;
@@ -270,7 +247,7 @@ with st.sidebar:
         "オフライン簡易分類（APIキー不要）": "offline",
     }[choice]
 
-   if provider == "claude":
+    if provider == "claude":
         model = st.selectbox(
             "モデル", ["claude-haiku-4-5", "claude-sonnet-5"],
             help="haiku は安くて速い。精度が欲しい時だけ sonnet に。",
@@ -302,10 +279,7 @@ def render_item(row) -> None:
     accent = style["color"]
     done = row["status"] == "完了"
 
-    # ★ユーザーが書いた文字は必ず html.escape() を通す（XSS対策）★
     title = html.escape(row["title"])
-
-    # 左端の時刻。時刻が無いものは「・」で高さを揃える
     time_label = row["start_at"][11:16] if row["start_at"] else "・"
 
     chips = []
@@ -352,7 +326,6 @@ def day_header_html(day: str | None, count: int, today_str: str) -> str:
     if day == "__created__":
         title, rel, cls = "登録した順", "", ""
     elif day:
-        # label_for は "9月18日(金) · 今日" の形。念のため区切りが無い場合も想定する
         parts = dateparse.label_for(day).split(" · ")
         title = parts[0]
         rel = parts[1] if len(parts) > 1 else ""
@@ -368,11 +341,7 @@ def day_header_html(day: str | None, count: int, today_str: str) -> str:
 
 
 def group_by_day(rows) -> "OrderedDict[str | None, list]":
-    """行のリストを日付ごとにまとめる。
-
-    fetch_items がすでに日付順で返してくれているので、
-    上から順に詰めていくだけで日付ごとの塊ができる。
-    """
+    """行のリストを日付ごとにまとめる。"""
     groups: OrderedDict = OrderedDict()
     for r in rows:
         groups.setdefault(r["event_date"], []).append(r)
@@ -467,8 +436,6 @@ with tab_input:
                         rec["end_at"] = original.get("end_at")
                         rec["all_day"] = original.get("all_day", 1)
                         rec["estimated_minutes"] = original.get("estimated_minutes")
-                        # 画面で日付を手書きされた可能性があるので形式を検証する。
-                        # 不正な文字列のまま保存すると、一覧の並び替えが壊れる。
                         rec["event_date"] = ai._valid_date(rec.get("event_date"))
                         if not rec["event_date"]:
                             rec["due_date"] = None
@@ -569,7 +536,6 @@ with tab_shift:
         items = st.session_state.shift_pending
         st.subheader(f"読み取り結果：{len(items)} 件")
 
-        # すでに登録済みの勤務は、チェックを外した状態で出す（二重登録の防止）
         existing = db.existing_schedule_keys()
 
         rows = []
@@ -624,8 +590,6 @@ with tab_shift:
                 if selected.empty:
                     st.warning("登録する行が1つも選ばれてへんで")
                 else:
-                    # 画面で修正された日付・時刻を、もう一度 to_items に通して検証する。
-                    # こうすると深夜またぎの計算などが自動でやり直される。
                     meta = st.session_state.shift_meta
                     raw_rows = [
                         {
@@ -658,14 +622,11 @@ with tab_shift:
 
 # =========================== ③タイムラインタブ ===========================
 with tab_list:
-    # --- カテゴリ絞り込み（タブ風ボタン） ---
-    # st.segmented_control は横並びのボタン型セレクタ。
-    # ドロップダウンと違って「今どれが選ばれてるか」が一目で分かる。
     tab_options = ["すべて"] + db.CATEGORIES
     picked = st.segmented_control(
         "カテゴリ", tab_options, default="すべて", label_visibility="collapsed"
     )
-    if picked is None:          # 選択解除されたら「すべて」に戻す
+    if picked is None:
         picked = "すべて"
     sel_cats = None if picked == "すべて" else [picked]
 
@@ -683,7 +644,6 @@ with tab_list:
 
     rows = db.fetch_items(sel_cats, statuses, keyword, order, descending)
 
-    # --- .ics 書き出し ---
     with st.expander("📤 カレンダーに取り込む（.icsファイル出力）"):
         e1, e2 = st.columns([3, 2])
         with e1:
@@ -724,14 +684,12 @@ with tab_list:
 
     st.divider()
 
-    # --- 日付ごとにまとめて表示 ---
     if not rows:
         st.info("まだ何もないで。入力タブから書いてみて。")
     else:
         st.caption(f"{len(rows)} 件")
         today_str = date.today().isoformat()
 
-        # 登録順のときは日付でまとめず、1枚のカードに全部並べる
         if order == "created":
             day_groups = {"__created__": rows}
         else:
