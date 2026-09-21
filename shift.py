@@ -1,18 +1,5 @@
 """
 shift.py — シフト表の画像をAIに読ませて、勤務予定を取り出す
-
-【マルチモーダルとは】
-  文字だけでなく、画像も一緒にAIへ渡せる機能のこと。
-  Claude も Gemini も、画像をbase64（文字列に変換した形式）にして
-  メッセージに添付すると、その中身を読んで答えてくれる。
-
-【この機能の流れ】
-  スマホで撮った写真
-    → 画像を縮小・JPEG化（送信量を減らす／APIの上限に収める）
-    → base64に変換してAIへ送る
-    → AIが「日付・開始時刻・終了時刻」をJSONで返す
-    → Python側で日付と時刻を検証し、深夜またぎや年またぎを補正
-    → 画面で確認・修正してからDBへ一括保存
 """
 
 from __future__ import annotations
@@ -26,31 +13,17 @@ from datetime import date, datetime, timedelta
 
 from PIL import Image
 
-# 画像の長辺をこのサイズまで縮める。
-# 大きすぎる画像は「送信に時間がかかる」「APIの容量上限に引っかかる」ので縮小する。
-# 文字が読める程度の解像度は残るので、精度はほぼ落ちない。
 MAX_IMAGE_SIDE = 1568
 JPEG_QUALITY = 85
 
 
-# ---------------------------------------------------------------------------
-# 画像の下ごしらえ
-# ---------------------------------------------------------------------------
-
 def prepare_image(raw: bytes) -> tuple[str, str]:
-    """画像を縮小してJPEGに変換し、(base64文字列, メディアタイプ) を返す。
-
-    base64（ベースろくじゅうよん）＝ 画像などのデータを、
-    アルファベットと数字だけの文字列に変換する方式。
-    APIはテキストしか送れないので、画像はこの形にして渡す。
-    """
     img = Image.open(io.BytesIO(raw))
 
-    # スマホ写真は回転情報が別で持たれていることがあるので、正しい向きに直す
     try:
         from PIL import ImageOps
         img = ImageOps.exif_transpose(img)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     if img.mode not in ("RGB", "L"):
@@ -62,10 +35,6 @@ def prepare_image(raw: bytes) -> tuple[str, str]:
     img.save(buf, format="JPEG", quality=JPEG_QUALITY)
     return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
 
-
-# ---------------------------------------------------------------------------
-# AIへの指示文
-# ---------------------------------------------------------------------------
 
 SHIFT_SYSTEM_PROMPT = """あなたはアルバイトのシフト表を読み取る専門アシスタントです。
 
@@ -103,10 +72,6 @@ def build_shift_prompt(person_name: str, today: date, hint: str = "") -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# 各AIの呼び出し
-# ---------------------------------------------------------------------------
-
 def read_with_claude(raw: bytes, person_name: str, model: str, hint: str = "") -> list[dict]:
     from anthropic import Anthropic
 
@@ -117,7 +82,6 @@ def read_with_claude(raw: bytes, person_name: str, model: str, hint: str = "") -
     b64, media_type = prepare_image(raw)
     client = Anthropic(api_key=api_key)
 
-    # content に「画像ブロック」と「テキストブロック」を並べて渡すのがポイント
     resp = client.messages.create(
         model=model,
         max_tokens=3000,
@@ -161,7 +125,6 @@ def read_with_gemini(raw: bytes, person_name: str, model: str, hint: str = "") -
 
 
 def _extract_json(raw: str) -> list[dict]:
-    """AIの返答からJSON配列を取り出す（classify と同じ考え方）。"""
     text = re.sub(r"^```(?:json)?", "", raw.strip()).strip()
     text = re.sub(r"```$", "", text).strip()
     start, end = text.find("["), text.rfind("]")
@@ -171,21 +134,16 @@ def _extract_json(raw: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-# ---------------------------------------------------------------------------
-# 画像が使えないとき用：テキストを貼り付けて取り込む
-# ---------------------------------------------------------------------------
-
 _LINE_PAT = re.compile(
-    r"(?P<month>\d{1,2})\s*[/月]\s*(?P<day>\d{1,2})\s*日?"          # 9/21 または 9月21日
-    r"[^\d]{0,12}?"                                                  # 曜日や記号を読み飛ばす
-    r"(?P<sh>\d{1,2})\s*[:：時]?\s*(?P<sm>\d{2})?"                   # 18:00 / 18時 / 18
-    r"\s*[〜~～\-–—ー to]+\s*"                                        # 〜 や -
-    r"(?P<eh>\d{1,2})\s*[:：時]?\s*(?P<em>\d{2})?"                   # 23:00 / 23時 / 23
+    r"(?P<month>\d{1,2})\s*[/月]\s*(?P<day>\d{1,2})\s*日?"
+    r"[^\d]{0,12}?"
+    r"(?P<sh>\d{1,2})\s*[:：時]?\s*(?P<sm>\d{2})?"
+    r"\s*[〜~～\-–—ー to]+\s*"
+    r"(?P<eh>\d{1,2})\s*[:：時]?\s*(?P<em>\d{2})?"
 )
 
 
 def read_from_text(text: str, today: date | None = None) -> list[dict]:
-    """「9/21 18:00-23:00」のような行を拾う。APIキーが無くても使える入口。"""
     today = today or date.today()
     results = []
     for line in text.splitlines():
@@ -198,7 +156,6 @@ def read_from_text(text: str, today: date | None = None) -> list[dict]:
             d = date(year, month, day)
         except ValueError:
             continue
-        # 年をまたぐ場合の補正（12月のシフトを1月に入力した、など）
         if (d - today).days < -180:
             d = d.replace(year=year + 1)
         elif (d - today).days > 200:
@@ -216,10 +173,6 @@ def read_from_text(text: str, today: date | None = None) -> list[dict]:
     return results
 
 
-# ---------------------------------------------------------------------------
-# 取り出した結果を検証して、DBに入れられる形に整える
-# ---------------------------------------------------------------------------
-
 def _valid_date(s) -> str | None:
     if not isinstance(s, str):
         return None
@@ -233,7 +186,7 @@ def _valid_time(s) -> str | None:
     if not isinstance(s, str):
         return None
     s = s.strip().replace("：", ":")
-    if re.fullmatch(r"\d{1,2}", s):        # 「18」だけの場合も許す
+    if re.fullmatch(r"\d{1,2}", s):
         s = f"{int(s):02d}:00"
     try:
         return datetime.strptime(s, "%H:%M").strftime("%H:%M")
@@ -242,11 +195,6 @@ def _valid_time(s) -> str | None:
 
 
 def to_items(shifts: list[dict], workplace: str = "バイト") -> list[dict]:
-    """AIの出力を、DBに保存できる items の形に変換する。
-
-    ここで深夜またぎの補正もやる。
-    例: 22:00〜翌2:00 の勤務は、終了日時を「翌日の2:00」にせなアカン。
-    """
     items = []
     for s in shifts:
         if not isinstance(s, dict):
@@ -255,7 +203,7 @@ def to_items(shifts: list[dict], workplace: str = "バイト") -> list[dict]:
         start = _valid_time(s.get("start"))
         end = _valid_time(s.get("end"))
         if not d or not start:
-            continue  # 日付か開始時刻が読めんかったものは捨てる
+            continue
 
         start_dt = datetime.strptime(f"{d} {start}", "%Y-%m-%d %H:%M")
         end_dt = None
@@ -263,7 +211,6 @@ def to_items(shifts: list[dict], workplace: str = "バイト") -> list[dict]:
         if end:
             end_dt = datetime.strptime(f"{d} {end}", "%Y-%m-%d %H:%M")
             if end_dt <= start_dt:
-                # 終了が開始以前 → 日付をまたいだ深夜勤務とみなして翌日にする
                 end_dt += timedelta(days=1)
                 crossed = True
 
@@ -293,7 +240,6 @@ def to_items(shifts: list[dict], workplace: str = "バイト") -> list[dict]:
             }
         )
 
-    # 同じ日付・同じ開始時刻のものが二重に出てきたら1つにまとめる
     seen, unique = set(), []
     for it in items:
         key = (it["event_date"], it["start_at"])
@@ -306,10 +252,6 @@ def to_items(shifts: list[dict], workplace: str = "バイト") -> list[dict]:
     return unique
 
 
-# ---------------------------------------------------------------------------
-# 外から呼ぶのはこの関数
-# ---------------------------------------------------------------------------
-
 def extract(
     image_bytes: bytes | None = None,
     pasted_text: str = "",
@@ -319,13 +261,12 @@ def extract(
     model: str | None = None,
     hint: str = "",
 ) -> tuple[list[dict], str]:
-    """シフトを読み取って (items, 使った手段) を返す。"""
     if image_bytes:
         if provider == "claude":
             m = model or "claude-haiku-4-5"
             return to_items(read_with_claude(image_bytes, person_name, m, hint), workplace), m
         if provider == "gemini":
-        m = model or "gemini-3.6-flash"
+            m = model or "gemini-3.6-flash"
             return to_items(read_with_gemini(image_bytes, person_name, m, hint), workplace), m
         raise RuntimeError(
             "画像の読み取りにはAPIキーが必要やで。"
@@ -336,4 +277,3 @@ def extract(
         return to_items(read_from_text(pasted_text), workplace), "text-rules"
 
     return [], "none"
-
