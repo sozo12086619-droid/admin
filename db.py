@@ -228,14 +228,20 @@ def init_db() -> None:
 # 保存
 # ---------------------------------------------------------------------------
 
-def insert_raw_note(body: str, source: str = "manual") -> int:
+def insert_raw_note(
+    body: str,
+    source: str = "manual",
+    user_id: str | None = None,
+    **kwargs,
+) -> int:
     """殴り書きの原文を保存し、そのIDを返す。"""
+    target_user = user_id or USER_ID
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO public.raw_notes (user_id, created_at, body, source) "
                 "VALUES (%s, %s, %s, %s) RETURNING id",
-                (USER_ID, now_iso(), body, source),
+                (target_user, now_iso(), body, source),
             )
             return cur.fetchone()[0]
 
@@ -253,9 +259,15 @@ _ITEM_COLUMNS = (
 )
 
 
-def _row_values(it: dict, raw_note_id: int | None, ts: str, ai_model: str) -> tuple:
+def _row_values(
+    it: dict,
+    raw_note_id: int | None,
+    ts: str,
+    ai_model: str,
+    user_id: str = USER_ID,
+) -> tuple:
     return (
-        USER_ID,
+        user_id,
         raw_note_id,
         ts,
         ts,
@@ -277,13 +289,20 @@ def _row_values(it: dict, raw_note_id: int | None, ts: str, ai_model: str) -> tu
     )
 
 
-def insert_items(items: list[dict], raw_note_id: int | None, ai_model: str) -> int:
+def insert_items(
+    items: list[dict],
+    raw_note_id: int | None,
+    ai_model: str,
+    user_id: str | None = None,
+    **kwargs,
+) -> int:
     """項目リストをまとめて保存する。保存件数を返す。"""
     if not items:
         return 0
 
+    target_user = user_id or USER_ID
     ts = now_iso()
-    rows = [_row_values(it, raw_note_id, ts, ai_model) for it in items]
+    rows = [_row_values(it, raw_note_id, ts, ai_model, target_user) for it in items]
     cols = ", ".join(_ITEM_COLUMNS)
 
     with get_conn() as conn:
@@ -306,10 +325,13 @@ def fetch_items(
     keyword: str = "",
     order: str = "timeline",
     descending: bool = True,
+    user_id: str | None = None,
+    **kwargs,
 ) -> list[dict]:
     """条件に合う項目を取り出す。"""
+    target_user = user_id or USER_ID
     sql = "SELECT * FROM public.items WHERE user_id = %s"
-    params: list = [USER_ID]
+    params: list = [target_user]
 
     if categories:
         sql += " AND category = ANY(%s)"
@@ -336,28 +358,31 @@ def fetch_items(
     return query(sql, params)
 
 
-def fetch_raw_notes(limit: int = 50) -> list[dict]:
+def fetch_raw_notes(limit: int = 50, user_id: str | None = None, **kwargs) -> list[dict]:
+    target_user = user_id or USER_ID
     return query(
         "SELECT * FROM public.raw_notes WHERE user_id = %s ORDER BY id DESC LIMIT %s",
-        (USER_ID, limit),
+        (target_user, limit),
     )
 
 
-def existing_schedule_keys() -> set[tuple[str, str]]:
+def existing_schedule_keys(user_id: str | None = None, **kwargs) -> set[tuple[str, str]]:
     """すでに登録済みの (日付, 開始日時) の組を集めて返す。"""
+    target_user = user_id or USER_ID
     rows = query(
         "SELECT event_date, start_at FROM public.items "
         "WHERE user_id = %s AND event_date IS NOT NULL AND start_at IS NOT NULL",
-        (USER_ID,),
+        (target_user,),
     )
     return {(r["event_date"], r["start_at"]) for r in rows}
 
 
-def count_by_category() -> dict[str, int]:
+def count_by_category(user_id: str | None = None, **kwargs) -> dict[str, int]:
+    target_user = user_id or USER_ID
     rows = query(
         "SELECT category, COUNT(*) AS n FROM public.items "
         "WHERE user_id = %s GROUP BY category",
-        (USER_ID,),
+        (target_user,),
     )
     return {r["category"]: int(r["n"]) for r in rows}
 
@@ -373,22 +398,24 @@ _UPDATABLE = {
 }
 
 
-def update_item(item_id: int, **fields) -> None:
+def update_item(item_id: int, user_id: str | None = None, **fields) -> None:
+    target_user = user_id or USER_ID
     fields = {k: v for k, v in fields.items() if k in _UPDATABLE}
     if not fields:
         return
 
     fields["updated_at"] = now_iso()
     assignments = ", ".join(f"{k} = %s" for k in fields)
-    params = list(fields.values()) + [item_id, USER_ID]
+    params = list(fields.values()) + [item_id, target_user]
     execute(
         f"UPDATE public.items SET {assignments} WHERE id = %s AND user_id = %s",
         params,
     )
 
 
-def delete_item(item_id: int) -> None:
+def delete_item(item_id: int, user_id: str | None = None, **kwargs) -> None:
+    target_user = user_id or USER_ID
     execute(
         "DELETE FROM public.items WHERE id = %s AND user_id = %s",
-        (item_id, USER_ID),
+        (item_id, target_user),
     )
