@@ -69,12 +69,6 @@ USER_ID = _secret("APP_USER_ID", "default") or "default"
 # ---------------------------------------------------------------------------
 # コネクションプール
 # ---------------------------------------------------------------------------
-# 「コネクションプール」＝ DBへの接続を数本作って使い回す仕組み。
-# 接続を作る処理は重い（ネットワーク越しに認証するため）ので、
-# 毎回作っていると画面の操作が1つ1つ遅くなる。
-#
-# Streamlit はユーザー操作のたびにスクリプトを再実行し、
-# しかも複数スレッドで動くことがあるので ThreadedConnectionPool を使う。
 
 _pool = None
 _pool_lock = threading.Lock()
@@ -88,18 +82,14 @@ def _get_pool():
             opts = {
                 "connect_timeout": 10,
                 "application_name": "memo-organizer",
-                # 重いクエリが詰まったままにならんように15秒で打ち切る
                 "options": "-c statement_timeout=15000",
             }
-            # Supabaseは暗号化必須。
-            # ただしURL側に sslmode が書かれている場合はそちらを尊重する
-            # （ローカルのPostgreSQLで動作確認するときに sslmode=disable にできる）
             if "sslmode=" not in dsn:
                 opts["sslmode"] = "require"
 
             _pool = pg_pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=5,          # 無料プランは接続数の上限が小さいので控えめに
+                maxconn=5,
                 dsn=dsn,
                 **opts,
             )
@@ -120,20 +110,11 @@ def reset_pool() -> None:
 
 @contextmanager
 def get_conn():
-    """プールから接続を借りて、終わったら返す。
-
-    正常終了 → commit（変更を確定）
-    例外発生 → rollback（変更を取り消し）
-    をこの中で自動でやるので、呼び出し側は with で囲むだけでええ。
-    """
+    """プールから接続を借りて、終わったら返す。"""
     p = _get_pool()
     conn = p.getconn()
     broken = False
 
-    # ★事前チェック（プレピン）★
-    # Streamlit Cloud のアプリはしばらく使わんとスリープする。
-    # 起きた時、プールの中の接続はすでに切れていることがある。
-    # 借りた直後に SELECT 1 を投げて生死を確認し、死んでたら繋ぎ直す。
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
@@ -160,11 +141,7 @@ def get_conn():
 # ---------------------------------------------------------------------------
 
 def query(sql: str, params: tuple | list = ()) -> list[dict]:
-    """SELECT用。結果を辞書のリストで返す。
-
-    RealDictCursor を使うと row["title"] のようにカラム名で読める。
-    SQLite版の sqlite3.Row と同じ使い勝手なので、app.py は変更不要。
-    """
+    """SELECT用。結果を辞書のリストで返す。"""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
@@ -179,7 +156,7 @@ def execute(sql: str, params: tuple | list = ()) -> None:
 
 
 def health_check() -> tuple[bool, str]:
-    """接続できるかを確認する。サイドバーなどに出すと便利。"""
+    """接続できるかを確認する。"""
     try:
         row = query("SELECT current_database() AS db, version() AS v")[0]
         return True, f"{row['db']} / {row['v'].split(',')[0]}"
@@ -196,12 +173,7 @@ def now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """テーブルが無ければ作る。
-
-    通常は Supabase の SQL Editor で supabase_schema.sql を実行して作るが、
-    やり忘れても動くように、アプリ側からも同じものを作れるようにしてある。
-    （SQLiteの時と同じく、毎回呼んでも害はない）
-    """
+    """テーブルが無ければ作る。"""
     ddl = [
         """
         CREATE TABLE IF NOT EXISTS public.raw_notes (
@@ -257,11 +229,7 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 def insert_raw_note(body: str, source: str = "manual") -> int:
-    """殴り書きの原文を保存し、そのIDを返す。
-
-    SQLiteの cur.lastrowid に相当するものが PostgreSQL には無いので、
-    RETURNING id を付けて「挿入した行のidを返せ」と指示する。
-    """
+    """殴り書きの原文を保存し、そのIDを返す。"""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -272,7 +240,11 @@ def insert_raw_note(body: str, source: str = "manual") -> int:
             return cur.fetchone()[0]
 
 
-# INSERT する列の並び。ここと _row_values の並びは必ず一致させること
+# line_bot.py からの呼び出し用エイリアス
+save_raw_note = insert_raw_note
+
+
+# INSERT する列の並び
 _ITEM_COLUMNS = (
     "user_id", "raw_note_id", "created_at", "updated_at",
     "category", "title", "detail", "tags", "date_text",
@@ -306,11 +278,7 @@ def _row_values(it: dict, raw_note_id: int | None, ts: str, ai_model: str) -> tu
 
 
 def insert_items(items: list[dict], raw_note_id: int | None, ai_model: str) -> int:
-    """項目リストをまとめて保存する。保存件数を返す。
-
-    execute_values を使うと、何十件あっても1回の通信で送れる。
-    クラウドDBは1往復ごとに通信時間がかかるので、まとめて送るのが大事。
-    """
+    """項目リストをまとめて保存する。保存件数を返す。"""
     if not items:
         return 0
 
@@ -339,17 +307,11 @@ def fetch_items(
     order: str = "timeline",
     descending: bool = True,
 ) -> list[dict]:
-    """条件に合う項目を取り出す。
-
-    order="timeline" … event_date（無ければ登録日）の日付順
-    order="created"  … 登録した順
-    """
+    """条件に合う項目を取り出す。"""
     sql = "SELECT * FROM public.items WHERE user_id = %s"
     params: list = [USER_ID]
 
     if categories:
-        # PostgreSQL では = ANY(%s) にリストをそのまま渡せる。
-        # SQLiteのように ? を個数ぶん並べる必要がない。
         sql += " AND category = ANY(%s)"
         params.append(list(categories))
 
@@ -358,14 +320,11 @@ def fetch_items(
         params.append(list(statuses))
 
     if keyword:
-        # ILIKE は大文字小文字を区別しない検索（PostgreSQL独自）
         sql += " AND (title ILIKE %s OR detail ILIKE %s)"
         params.extend([f"%{keyword}%", f"%{keyword}%"])
 
     direction = "DESC" if descending else "ASC"
     if order == "timeline":
-        # COALESCE(a, b) = 「aがNULLならbを使う」
-        # 日付が無い項目は登録日で並べ、かつ日付ありを先に出す
         sql += (
             " ORDER BY (event_date IS NULL) ASC,"
             f" COALESCE(event_date, substr(created_at, 1, 10)) {direction},"
@@ -385,10 +344,7 @@ def fetch_raw_notes(limit: int = 50) -> list[dict]:
 
 
 def existing_schedule_keys() -> set[tuple[str, str]]:
-    """すでに登録済みの (日付, 開始日時) の組を集めて返す。
-
-    シフト表を2回読み込んでしまったときの二重登録を防ぐために使う。
-    """
+    """すでに登録済みの (日付, 開始日時) の組を集めて返す。"""
     rows = query(
         "SELECT event_date, start_at FROM public.items "
         "WHERE user_id = %s AND event_date IS NOT NULL AND start_at IS NOT NULL",
@@ -410,8 +366,6 @@ def count_by_category() -> dict[str, int]:
 # 更新・削除
 # ---------------------------------------------------------------------------
 
-# 更新を許す列の一覧。
-# ここに無い名前は弾く（SQL文に列名を直接埋め込むため、安全のための門番）
 _UPDATABLE = {
     "category", "title", "detail", "tags", "date_text", "event_date",
     "due_date", "start_at", "end_at", "all_day", "importance",
@@ -420,7 +374,6 @@ _UPDATABLE = {
 
 
 def update_item(item_id: int, **fields) -> None:
-    """使い方: update_item(3, status="完了")"""
     fields = {k: v for k, v in fields.items() if k in _UPDATABLE}
     if not fields:
         return
