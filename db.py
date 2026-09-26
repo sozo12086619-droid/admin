@@ -102,7 +102,8 @@ def get_conn():
             broken = True
         raise
     finally:
-        p.putconn(conn, broken)
+        # ここを close=broken に修正
+        p.putconn(conn, close=broken)
 
 # ---------------------------------------------------------------------------
 # 小さなヘルパー
@@ -171,18 +172,17 @@ def init_db() -> None:
             confidence        real
         )
         """,
-        # 【新規追加】家計簿・給料管理用テーブル
         """
         CREATE TABLE IF NOT EXISTS public.money_records (
             id          bigserial PRIMARY KEY,
             user_id     text NOT NULL DEFAULT 'default',
             created_at  text NOT NULL,
             record_date text NOT NULL,
-            record_type text NOT NULL, -- 'income'(収入) または 'expense'(支出)
-            category    text NOT NULL, -- 'バイト', '食費', '日用品' など
-            title       text NOT NULL, -- 'すき家', 'セブンイレブン' など
+            record_type text NOT NULL,
+            category    text NOT NULL,
+            title       text NOT NULL,
             amount      integer NOT NULL,
-            status      text NOT NULL DEFAULT 'confirmed', -- 'expected'(見込み) / 'confirmed'(確定)
+            status      text NOT NULL DEFAULT 'confirmed',
             detail      text DEFAULT '',
             raw_note_id bigint REFERENCES public.raw_notes(id) ON DELETE SET NULL
         )
@@ -198,7 +198,7 @@ def init_db() -> None:
                 cur.execute(sql)
 
 # ---------------------------------------------------------------------------
-# 家計簿・給料関連（新規追加）
+# 家計簿・給料関連
 # ---------------------------------------------------------------------------
 
 def insert_money_record(
@@ -212,7 +212,6 @@ def insert_money_record(
     raw_note_id: int | None = None,
     user_id: str | None = None,
 ) -> int:
-    """家計簿レコード（給料見込み・レシート支出）を1件登録する"""
     target_user = user_id or USER_ID
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -227,7 +226,6 @@ def insert_money_record(
             return cur.fetchone()[0]
 
 def fetch_monthly_money_summary(year_month: str, user_id: str | None = None) -> dict:
-    """指定月（例: '2026-10'）の収入見込み・確定支出・収支を計算する"""
     target_user = user_id or USER_ID
     sql = """
         SELECT record_type, status, SUM(amount) AS total
