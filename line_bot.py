@@ -2,6 +2,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -23,7 +24,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 USER_ID = os.environ.get("APP_USER_ID", "default")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "")
 
-# 起動時にデータベーステーブルが存在するか自動チェック・作成
+# 起動時にデータベーステーブルの存在確認・作成
 try:
     db.init_db()
 except Exception as e:
@@ -129,7 +130,6 @@ def add_event_to_calendar(parsed):
     if not service or not CALENDAR_ID:
         raise Exception("カレンダー認証情報またはCALENDAR_IDが未設定です")
 
-    # カレンダーのタイトルはバイト名のみですっきり表示
     event = {
         'summary': parsed['summary'],
         'description': (
@@ -148,9 +148,141 @@ def add_event_to_calendar(parsed):
     }
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
+# -------------------------------------------------------------
+# 家計簿ダッシュボード（スマホ対応Web画面）
+# -------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+def dashboard(month: str | None = None):
+    # 月の指定がない場合は今月（例: 2026-10）
+    target_month = month or datetime.now().strftime("%Y-%m")
+    
+    # 前月・翌月の計算
+    curr_dt = datetime.strptime(f"{target_month}-01", "%Y-%m-%d")
+    prev_dt = (curr_dt - timedelta(days=1)).replace(day=1)
+    next_dt = (curr_dt + timedelta(days=32)).replace(day=1)
+    prev_month_str = prev_dt.strftime("%Y-%m")
+    next_month_str = next_dt.strftime("%Y-%m")
+    year_str, month_str = target_month.split("-")
+
+    # Supabaseから集計サマリーと明細を取得
+    summary = db.fetch_monthly_money_summary(target_month, USER_ID)
+    records = db.query(
+        """
+        SELECT * FROM public.money_records
+        WHERE user_id = %s AND record_date LIKE %s
+        ORDER BY record_date DESC, id DESC
+        """,
+        (USER_ID, f"{target_month}%")
+    )
+
+    # 明細カードのHTML作成
+    records_html = ""
+    if not records:
+        records_html = '<div class="empty-state">この月の記録はまだありません</div>'
+    else:
+        for r in records:
+            is_income = r["record_type"] == "income"
+            sign = "+" if is_income else "-"
+            badge_class = "badge-income" if is_income else "badge-expense"
+            badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else "支出")
+            
+            detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
+            
+            records_html += f"""
+            <div class="record-card">
+                <div class="record-left">
+                    <span class="badge {badge_class}">{badge_text}</span>
+                    <span class="record-title">{r["title"]}</span>
+                    <div class="record-date">{r["record_date"]}</div>
+                    {detail_line}
+                </div>
+                <div class="record-amount {'amount-income' if is_income else 'amount-expense'}">
+                    {sign}¥{r["amount"]:,}
+                </div>
+            </div>
+            """
+
+    # 全体HTML
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <title>家計簿 & シフト管理</title>
+        <style>
+            * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+            body {{ background-color: #f7f8fa; color: #333; padding-bottom: 40px; }}
+            .header {{ background: #2c3e50; color: white; padding: 18px 20px; text-align: center; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            .header h1 {{ font-size: 1.1rem; font-weight: 600; letter-spacing: 0.5px; }}
+            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 20px; margin-bottom: 16px; border-bottom: 1px solid #eee; }}
+            .month-nav a {{ text-decoration: none; color: #3498db; font-size: 0.95rem; font-weight: bold; padding: 6px 12px; border-radius: 6px; background: #edf5fc; }}
+            .current-month {{ font-size: 1.2rem; font-weight: 700; color: #2c3e50; }}
+            .container {{ max-width: 500px; margin: 0 auto; padding: 0 16px; }}
+            
+            /* サマリーカード */
+            .summary-card {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 3px 12px rgba(0,0,0,0.04); margin-bottom: 20px; }}
+            .summary-main {{ text-align: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px dashed #eee; }}
+            .summary-main-label {{ font-size: 0.85rem; color: #7f8c8d; margin-bottom: 4px; }}
+            .summary-main-val {{ font-size: 2rem; font-weight: 800; color: #27ae60; }}
+            .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; text-align: center; }}
+            .summary-sub-label {{ font-size: 0.8rem; color: #7f8c8d; }}
+            .summary-sub-val {{ font-size: 1.15rem; font-weight: 700; margin-top: 4px; }}
+            .val-expense {{ color: #e74c3c; }}
+            .val-balance {{ color: #2980b9; }}
+            
+            /* 明細リスト */
+            .section-title {{ font-size: 0.95rem; font-weight: 700; color: #555; margin-bottom: 10px; padding-left: 4px; }}
+            .record-card {{ background: white; border-radius: 12px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }}
+            .record-left {{ display: flex; flex-direction: column; gap: 4px; }}
+            .record-title {{ font-size: 1rem; font-weight: 700; color: #2c3e50; margin-left: 4px; }}
+            .record-date {{ font-size: 0.75rem; color: #95a5a6; }}
+            .record-detail {{ font-size: 0.78rem; color: #7f8c8d; margin-top: 2px; }}
+            .badge {{ font-size: 0.7rem; padding: 2px 7px; border-radius: 4px; font-weight: bold; width: fit-content; }}
+            .badge-income {{ background: #e8f8f0; color: #27ae60; }}
+            .badge-expense {{ background: #fdf0ee; color: #e74c3c; }}
+            .record-amount {{ font-size: 1.1rem; font-weight: 800; white-space: nowrap; }}
+            .amount-income {{ color: #27ae60; }}
+            .amount-expense {{ color: #e74c3c; }}
+            .empty-state {{ text-align: center; padding: 30px; color: #bdc3c7; font-size: 0.9rem; background: white; border-radius: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>家計簿 & シフト管理</h1>
+        </div>
+        
+        <div class="month-nav">
+            <a href="/?month={prev_month_str}">◀ 前月</a>
+            <div class="current-month">{year_str}年 {month_str}月</div>
+            <a href="/?month={next_month_str}">翌月 ▶</a>
+        </div>
+        
+        <div class="container">
+            <div class="summary-card">
+                <div class="summary-main">
+                    <div class="summary-main-label">バイト給料（見込み合計）</div>
+                    <div class="summary-main-val">¥{summary["total_income"]:,}</div>
+                </div>
+                <div class="summary-grid">
+                    <div>
+                        <div class="summary-sub-label">支出合計</div>
+                        <div class="summary-sub-val val-expense">¥{summary["expenses"]:,}</div>
+                    </div>
+                    <div>
+                        <div class="summary-sub-label">今月の差引残高</div>
+                        <div class="summary-sub-val val-balance">¥{summary["balance"]:,}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section-title">登録済みのシフト・収支一覧</div>
+            {records_html}
+        </div>
+    </body>
+    </html>
+    """
+    return html_content
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -183,12 +315,10 @@ def handle_text_message(event):
         parsed = parse_shift_text(line)
         if parsed:
             try:
-                # Googleカレンダーへ追加
                 add_event_to_calendar(parsed)
                 sal = parsed['salary']
                 total_expected_salary += sal['total_pay']
                 
-                # Supabase（家計簿）へ見込み収入として保存
                 detail_text = f"{parsed['time_str']} (昼{sal['day_hours']}h/深夜{sal['night_hours']}h)"
                 db.insert_money_record(
                     record_date=parsed["record_date"],
