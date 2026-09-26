@@ -23,7 +23,13 @@ CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 USER_ID = os.environ.get("APP_USER_ID", "default")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "")
 
-# バイト先ごとの時給設定（昼: 9:00〜22:00 / 深夜: 22:00〜翌9:00）
+# 起動時にデータベーステーブルが存在するか自動チェック・作成
+try:
+    db.init_db()
+except Exception as e:
+    print(f"DB Init Error: {e}")
+
+# バイト先ごとの時給設定
 WAGE_SETTINGS = {
     "すき家": {"day": 1150, "night": 1438},
     "default": {"day": 1150, "night": 1438},
@@ -37,7 +43,6 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 def get_calendar_service():
-    """GoogleカレンダーAPIのクライアントを作成"""
     if not os.path.exists(CREDENTIALS_PATH):
         return None
     creds = service_account.Credentials.from_service_account_file(
@@ -47,7 +52,6 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 def calculate_salary(start_dt: datetime, end_dt: datetime, summary: str):
-    """勤務時間から通常・深夜時間を集計し、見込み給料を計算"""
     wage_info = WAGE_SETTINGS["default"]
     for key in WAGE_SETTINGS:
         if key in summary:
@@ -82,7 +86,6 @@ def calculate_salary(start_dt: datetime, end_dt: datetime, summary: str):
     }
 
 def parse_shift_text(text: str):
-    """シフトテキストを解析"""
     date_match = re.search(r'(?:(\d{4})[/-年])?\s*(\d{1,2})[/-月](\d{1,2})日?', text)
     time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*[-〜~～]\s*(\d{1,2})(?::(\d{2}))?', text)
 
@@ -113,6 +116,7 @@ def parse_shift_text(text: str):
 
     return {
         "summary": summary,
+        "record_date": f"{year:04d}-{month:02d}-{day:02d}",
         "start": start_dt.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         "end": end_dt.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         "date_str": f"{month}/{day}",
@@ -121,13 +125,13 @@ def parse_shift_text(text: str):
     }
 
 def add_event_to_calendar(parsed):
-    """Googleカレンダーに予定を登録（タイトルはバイト名のみですっきり表示）"""
     service = get_calendar_service()
     if not service or not CALENDAR_ID:
         raise Exception("カレンダー認証情報またはCALENDAR_IDが未設定です")
 
+    # カレンダーのタイトルはバイト名のみですっきり表示
     event = {
-        'summary': parsed['summary'],  # ← ここを「すき家」等のバイト名のみに設定
+        'summary': parsed['summary'],
         'description': (
             f"見込み給料: ¥{parsed['salary']['total_pay']:,}\n"
             f"(昼: {parsed['salary']['day_hours']}h / 深夜: {parsed['salary']['night_hours']}h)\n"
@@ -169,7 +173,7 @@ def handle_text_message(event):
     except Exception as e:
         print(f"DB Error: {e}")
 
-    # 2. シフト判定・カレンダー登録・給料計算
+    # 2. シフト判定・カレンダー登録・家計簿保存
     calendar_success = []
     calendar_error = None
     total_expected_salary = 0
@@ -179,26 +183,41 @@ def handle_text_message(event):
         parsed = parse_shift_text(line)
         if parsed:
             try:
+                # Googleカレンダーへ追加
                 add_event_to_calendar(parsed)
                 sal = parsed['salary']
                 total_expected_salary += sal['total_pay']
                 
+                # Supabase（家計簿）へ見込み収入として保存
+                detail_text = f"{parsed['time_str']} (昼{sal['day_hours']}h/深夜{sal['night_hours']}h)"
+                db.insert_money_record(
+                    record_date=parsed["record_date"],
+                    record_type="income",
+                    category="バイト",
+                    title=parsed["summary"],
+                    amount=sal["total_pay"],
+                    status="expected",
+                    detail=detail_text,
+                    raw_note_id=raw_id,
+                    user_id=USER_ID
+                )
+
                 detail = f"・{parsed['date_str']} {parsed['time_str']} {parsed['summary']}\n  💰見込: ¥{sal['total_pay']:,} (昼{sal['day_hours']}h / 深夜{sal['night_hours']}h)"
                 calendar_success.append(detail)
             except Exception as e:
                 calendar_error = str(e)
-                print(f"Calendar Error: {e}")
+                print(f"Calendar / DB Error: {e}")
 
     # 3. LINE返信
     if calendar_success:
-        reply_lines = ["カレンダー登録 & 給料計算完了！📅💰", ""]
+        reply_lines = ["カレンダー & 家計簿に登録したで！📅💰", ""]
         reply_lines.extend(calendar_success)
         
         if len(calendar_success) > 1:
             reply_lines.append("")
             reply_lines.append(f"【今回の一括合計】 ¥{total_expected_salary:,}")
 
-        reply_lines.append("\n（TimeTreeにも反映されるで！）")
+        reply_lines.append("\n（カレンダーは予定名のみスッキリ反映済！）")
         
         if calendar_error:
             reply_lines.append(f"\n※一部エラー: {calendar_error}")
