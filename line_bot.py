@@ -1,5 +1,8 @@
 import os
 import re
+import json
+import base64
+import urllib.request
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -9,10 +12,11 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
+    MessagingApiBlob,
     ReplyMessageRequest,
     TextMessage
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import db
@@ -23,6 +27,7 @@ CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 USER_ID = os.environ.get("APP_USER_ID", "default")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # 起動時にデータベーステーブルの存在確認・作成
 try:
@@ -149,14 +154,64 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
-# 家計簿ダッシュボード（スマホ対応Web画面）
+# レシート画像解析 (Gemini API)
+# -------------------------------------------------------------
+def analyze_receipt_image(image_bytes: bytes) -> dict:
+    if not GEMINI_API_KEY:
+        raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    b64_img = base64.b64encode(image_bytes).decode("utf-8")
+    now_str = datetime.now().strftime("%Y-%m-%d")
+
+    prompt = (
+        f"このレシート画像を読み取り、以下のJSON形式のみで出力してください。\n"
+        f"マークダウンの```json等は含めず、純粋なJSON文字列のみを出力してください。\n"
+        f"{{\n"
+        f'  "date": "YYYY-MM-DD形式。レシートに年がない場合は現在の年を補完。不明なら「{now_str}」",\n'
+        f'  "store": "店名（例: セブンイレブン、すき家など）",\n'
+        f'  "amount": 合計金額（支払った税込総額、数値の整数のみ）,\n'
+        f'  "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
+        f'  "detail": "購入した主な品目（カンマ区切りで簡潔に）"\n'
+        f"}}"
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": b64_img
+                    }
+                }
+            ]
+        }],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as res:
+        res_data = json.loads(res.read().decode("utf-8"))
+        text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text.strip())
+
+# -------------------------------------------------------------
+# 家計簿ダッシュボード（Web画面）
 # -------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(month: str | None = None):
-    # 月の指定がない場合は今月（例: 2026-10）
     target_month = month or datetime.now().strftime("%Y-%m")
     
-    # 前月・翌月の計算
     curr_dt = datetime.strptime(f"{target_month}-01", "%Y-%m-%d")
     prev_dt = (curr_dt - timedelta(days=1)).replace(day=1)
     next_dt = (curr_dt + timedelta(days=32)).replace(day=1)
@@ -164,7 +219,6 @@ def dashboard(month: str | None = None):
     next_month_str = next_dt.strftime("%Y-%m")
     year_str, month_str = target_month.split("-")
 
-    # Supabaseから集計サマリーと明細を取得
     summary = db.fetch_monthly_money_summary(target_month, USER_ID)
     records = db.query(
         """
@@ -175,7 +229,6 @@ def dashboard(month: str | None = None):
         (USER_ID, f"{target_month}%")
     )
 
-    # 明細カードのHTML作成
     records_html = ""
     if not records:
         records_html = '<div class="empty-state">この月の記録はまだありません</div>'
@@ -184,7 +237,7 @@ def dashboard(month: str | None = None):
             is_income = r["record_type"] == "income"
             sign = "+" if is_income else "-"
             badge_class = "badge-income" if is_income else "badge-expense"
-            badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else "支出")
+            badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else r["category"])
             
             detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
             
@@ -202,7 +255,6 @@ def dashboard(month: str | None = None):
             </div>
             """
 
-    # 全体HTML
     html_content = f"""
     <!DOCTYPE html>
     <html lang="ja">
@@ -220,7 +272,6 @@ def dashboard(month: str | None = None):
             .current-month {{ font-size: 1.2rem; font-weight: 700; color: #2c3e50; }}
             .container {{ max-width: 500px; margin: 0 auto; padding: 0 16px; }}
             
-            /* サマリーカード */
             .summary-card {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 3px 12px rgba(0,0,0,0.04); margin-bottom: 20px; }}
             .summary-main {{ text-align: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px dashed #eee; }}
             .summary-main-label {{ font-size: 0.85rem; color: #7f8c8d; margin-bottom: 4px; }}
@@ -231,7 +282,6 @@ def dashboard(month: str | None = None):
             .val-expense {{ color: #e74c3c; }}
             .val-balance {{ color: #2980b9; }}
             
-            /* 明細リスト */
             .section-title {{ font-size: 0.95rem; font-weight: 700; color: #555; margin-bottom: 10px; padding-left: 4px; }}
             .record-card {{ background: white; border-radius: 12px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }}
             .record-left {{ display: flex; flex-direction: column; gap: 4px; }}
@@ -294,18 +344,19 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return "OK"
 
+# -------------------------------------------------------------
+# テキストメッセージ処理（シフト登録・メモ保存）
+# -------------------------------------------------------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     text = event.message.text.strip()
     
-    # 1. Supabaseの raw_notes に保存
     raw_id = None
     try:
         raw_id = db.save_raw_note(user_id=USER_ID, body=text, source="line")
     except Exception as e:
         print(f"DB Error: {e}")
 
-    # 2. シフト判定・カレンダー登録・家計簿保存
     calendar_success = []
     calendar_error = None
     total_expected_salary = 0
@@ -338,7 +389,6 @@ def handle_text_message(event):
                 calendar_error = str(e)
                 print(f"Calendar / DB Error: {e}")
 
-    # 3. LINE返信
     if calendar_success:
         reply_lines = ["カレンダー & 家計簿に登録したで！📅💰", ""]
         reply_lines.extend(calendar_success)
@@ -366,5 +416,70 @@ def handle_text_message(event):
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text=reply_text)]
+            )
+        )
+
+# -------------------------------------------------------------
+# 画像メッセージ処理（レシート読み取り ➔ 家計簿支出登録）
+# -------------------------------------------------------------
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    # 1. LINEサーバーから画像バイナリを取得
+    try:
+        with ApiClient(configuration) as api_client:
+            blob_client = MessagingApiBlob(api_client)
+            image_bytes = blob_client.get_message_content(event.message.id)
+    except Exception as e:
+        reply_text = f"画像の取得に失敗しました💦\n{e}"
+        _send_reply(event.reply_token, reply_text)
+        return
+
+    # 2. Gemini API でレシート画像を解析
+    try:
+        data = analyze_receipt_image(image_bytes)
+    except Exception as e:
+        reply_text = f"レシートの読み取りでエラーが出たで💦\n{e}"
+        _send_reply(event.reply_token, reply_text)
+        return
+
+    # 3. Supabase（家計簿テーブル）に支出として保存
+    try:
+        rec_date = data.get("date") or datetime.now().strftime("%Y-%m-%d")
+        store = data.get("store") or "不明な店舗"
+        amount = int(data.get("amount") or 0)
+        category = data.get("category") or "その他"
+        detail = data.get("detail") or ""
+
+        db.insert_money_record(
+            record_date=rec_date,
+            record_type="expense",
+            category=category,
+            title=store,
+            amount=amount,
+            status="confirmed",
+            detail=detail,
+            user_id=USER_ID
+        )
+
+        reply_text = (
+            f"🧾 レシートを家計簿に記録したで！\n\n"
+            f"・店舗: {store}\n"
+            f"・日付: {rec_date}\n"
+            f"・金額: ¥{amount:,}（{category}）\n"
+            f"・内容: {detail}\n\n"
+            f"家計簿ダッシュボードの支出に即時反映されたで！"
+        )
+    except Exception as e:
+        reply_text = f"読み取りはできましたが保存でエラーが出ました💦\n{e}"
+
+    _send_reply(event.reply_token, reply_text)
+
+def _send_reply(reply_token: str, text: str):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)]
             )
         )
