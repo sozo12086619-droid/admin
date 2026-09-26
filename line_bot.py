@@ -23,10 +23,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 USER_ID = os.environ.get("APP_USER_ID", "default")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "")
 
-# -------------------------------------------------------------
 # バイト先ごとの時給設定（昼: 9:00〜22:00 / 深夜: 22:00〜翌9:00）
-# 新しいバイト先が増えたらここに追加できます
-# -------------------------------------------------------------
 WAGE_SETTINGS = {
     "すき家": {"day": 1150, "night": 1438},
     "default": {"day": 1150, "night": 1438},
@@ -50,10 +47,7 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 def calculate_salary(start_dt: datetime, end_dt: datetime, summary: str):
-    """
-    勤務時間から通常時間・深夜時間を集計し、見込み給料を計算する
-    """
-    # バイト先に応じた時給を取得
+    """勤務時間から通常・深夜時間を集計し、見込み給料を計算"""
     wage_info = WAGE_SETTINGS["default"]
     for key in WAGE_SETTINGS:
         if key in summary:
@@ -64,7 +58,6 @@ def calculate_salary(start_dt: datetime, end_dt: datetime, summary: str):
     day_minutes = 0
     night_minutes = 0
 
-    # 1分刻みで昼（9-22時）と深夜（22-9時）を正確に判定
     while current < end_dt:
         if 9 <= current.hour < 22:
             day_minutes += 1
@@ -89,9 +82,7 @@ def calculate_salary(start_dt: datetime, end_dt: datetime, summary: str):
     }
 
 def parse_shift_text(text: str):
-    """
-    メッセージから日付・時間・シフト名を解析し、給料も算出する
-    """
+    """シフトテキストを解析"""
     date_match = re.search(r'(?:(\d{4})[/-年])?\s*(\d{1,2})[/-月](\d{1,2})日?', text)
     time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*[-〜~～]\s*(\d{1,2})(?::(\d{2}))?', text)
 
@@ -109,7 +100,6 @@ def parse_shift_text(text: str):
     end_m = int(time_match.group(4)) if time_match.group(4) else 0
 
     start_dt = datetime(year, month, day, start_h, start_m)
-    # 日またぎ（終了時刻が開始時刻より前）の対応
     if end_h < start_h:
         end_dt = datetime(year, month, day, end_h, end_m) + timedelta(days=1)
     else:
@@ -119,7 +109,6 @@ def parse_shift_text(text: str):
     if not summary:
         summary = "シフト"
 
-    # 給料計算を実行
     salary = calculate_salary(start_dt, end_dt, summary)
 
     return {
@@ -132,14 +121,18 @@ def parse_shift_text(text: str):
     }
 
 def add_event_to_calendar(parsed):
-    """Googleカレンダーに予定を登録"""
+    """Googleカレンダーに予定を登録（タイトルはバイト名のみですっきり表示）"""
     service = get_calendar_service()
     if not service or not CALENDAR_ID:
         raise Exception("カレンダー認証情報またはCALENDAR_IDが未設定です")
 
     event = {
-        'summary': f"[{parsed['summary']}] ¥{parsed['salary']['total_pay']:,}",
-        'description': f"見込み給料: ¥{parsed['salary']['total_pay']:,}\n(通常 {parsed['salary']['day_hours']}h / 深夜 {parsed['salary']['night_hours']}h)",
+        'summary': parsed['summary'],  # ← ここを「すき家」等のバイト名のみに設定
+        'description': (
+            f"見込み給料: ¥{parsed['salary']['total_pay']:,}\n"
+            f"(昼: {parsed['salary']['day_hours']}h / 深夜: {parsed['salary']['night_hours']}h)\n"
+            f"時間: {parsed['time_str']}"
+        ),
         'start': {
             'dateTime': parsed['start'],
             'timeZone': 'Asia/Tokyo',
@@ -196,12 +189,11 @@ def handle_text_message(event):
                 calendar_error = str(e)
                 print(f"Calendar Error: {e}")
 
-    # 3. LINE返信メッセージの作成
+    # 3. LINE返信
     if calendar_success:
         reply_lines = ["カレンダー登録 & 給料計算完了！📅💰", ""]
         reply_lines.extend(calendar_success)
         
-        # 複数シフトが送られた場合は合計金額も表示
         if len(calendar_success) > 1:
             reply_lines.append("")
             reply_lines.append(f"【今回の一括合計】 ¥{total_expected_salary:,}")
@@ -219,7 +211,6 @@ def handle_text_message(event):
     else:
         reply_text = f"メモを受け取ったで！\n「{text}」"
 
-    # 4. LINEに返信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
