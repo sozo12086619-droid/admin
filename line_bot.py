@@ -22,6 +22,8 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import db
 
 app = FastAPI()
@@ -31,6 +33,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip("[]
 USER_ID = os.environ.get("APP_USER_ID", "default").strip("[] \t\r\n'\"")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "").strip("[] \t\r\n'\"")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip("[] \t\r\n'\"")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip("[] \t\r\n'\"")
 
 try:
     db.init_db()
@@ -159,36 +162,59 @@ PAST_RECORDS_DATA = [
     ("2026-08-31", "income", "給料", "給料まとめ", 117308),
 ]
 
-def do_sync():
-    # RETURNING id を指定することで no results to fetch を完全防止
-    db.query(
-        "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ' RETURNING id",
-        (USER_ID,)
-    )
+def clean_and_sync():
+    """重複データを一掃し、過去データを1度だけ綺麗に登録する"""
+    if DATABASE_URL:
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            # 重複した同一レコードを削除（最も古いidだけ残す）
+            cur.execute("""
+                DELETE FROM public.money_records a
+                USING public.money_records b
+                WHERE a.id > b.id
+                  AND a.user_id = b.user_id
+                  AND a.record_date::text = b.record_date::text
+                  AND a.title = b.title
+                  AND a.amount = b.amount
+                  AND a.record_type = b.record_type;
+            """)
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Deduplicate error: {e}")
+
+    # 不足分を重複チェック付きで登録
     for rec_date, r_type, cat, title, amt in PAST_RECORDS_DATA:
-        db.insert_money_record(
-            record_date=rec_date,
-            record_type=r_type,
-            category=cat,
-            title=title,
-            amount=amt,
-            status="confirmed",
-            detail="過去アプリより引き継ぎ",
-            user_id=USER_ID
-        )
+        try:
+            existing = db.query(
+                """
+                SELECT id FROM public.money_records 
+                WHERE user_id = %s AND record_date::text = %s AND title = %s AND amount = %s AND record_type = %s 
+                LIMIT 1
+                """,
+                (USER_ID, rec_date, title, amt, r_type)
+            )
+            if not existing:
+                db.insert_money_record(
+                    record_date=rec_date,
+                    record_type=r_type,
+                    category=cat,
+                    title=title,
+                    amount=amt,
+                    status="confirmed",
+                    detail="過去アプリより引き継ぎ",
+                    user_id=USER_ID
+                )
+        except Exception as e:
+            print(f"Insert check error: {e}")
 
+# 初回起動時にクリーンアップを実行
 try:
-    do_sync()
+    clean_and_sync()
 except Exception as e:
-    print(f"Auto sync error: {e}")
-
-@app.get("/sync-past")
-def sync_past_data_endpoint():
-    try:
-        do_sync()
-        return RedirectResponse(url="/?_t=" + str(int(time.time())))
-    except Exception as e:
-        return HTMLResponse(f"<h3>同期エラー: {e}</h3><pre>{traceback.format_exc()}</pre>")
+    print(f"Init clean error: {e}")
 
 def get_calendar_service():
     if not os.path.exists(CREDENTIALS_PATH):
@@ -448,10 +474,13 @@ async def add_manual_record(req: Request):
 @app.delete("/api/records/{record_id}")
 async def delete_record(record_id: int):
     try:
-        db.query(
-            "DELETE FROM public.money_records WHERE id = %s AND user_id = %s RETURNING id",
-            (record_id, USER_ID)
-        )
+        if DATABASE_URL:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM public.money_records WHERE id = %s AND user_id = %s", (record_id, USER_ID))
+            conn.commit()
+            cur.close()
+            conn.close()
         return JSONResponse({"status": "success"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
@@ -514,7 +543,7 @@ def dashboard(month: str | None = None):
         rem_103 = limit_103 - ytd_income_2026
         pct_103 = min(100.0, round((ytd_income_2026 / limit_103) * 100, 1))
 
-        # 4. 月別推移（直近15ヶ月分）
+        # 4. 月別推移（2025年7月から全件取得）
         monthly_trends = db.query(
             """
             SELECT 
@@ -525,7 +554,6 @@ def dashboard(month: str | None = None):
             WHERE user_id = %s
             GROUP BY SUBSTRING(record_date::text, 1, 7)
             ORDER BY ym ASC
-            LIMIT 15
             """,
             (USER_ID,)
         )
@@ -666,7 +694,7 @@ def dashboard(month: str | None = None):
                 .header {{ 
                     background: #0f172a; 
                     color: white; 
-                    padding: 14px 18px; 
+                    padding: 14px 24px; 
                     display: flex; 
                     justify-content: space-between; 
                     align-items: center; 
@@ -675,105 +703,105 @@ def dashboard(month: str | None = None):
                     z-index: 100; 
                     box-shadow: 0 2px 10px rgba(0,0,0,0.15); 
                 }}
-                .header h1 {{ font-size: 1rem; font-weight: 700; }}
-                .header-actions {{ display: flex; gap: 6px; }}
+                .header h1 {{ font-size: 1.1rem; font-weight: 700; }}
+                .header-actions {{ display: flex; gap: 8px; }}
                 .btn-action {{
                     border: none;
-                    padding: 7px 11px;
+                    padding: 8px 14px;
                     border-radius: 8px;
-                    font-size: 0.78rem;
+                    font-size: 0.82rem;
                     font-weight: 700;
                     cursor: pointer;
                     transition: transform 0.1s;
                 }}
                 .btn-action:active {{ transform: scale(0.95); }}
-                .btn-sync {{ background: #059669; color: white; }}
                 .btn-reload {{ background: #334155; color: #e2e8f0; }}
                 .btn-add {{ background: #2563eb; color: white; }}
 
-                .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
+                .container {{ max-width: 960px; margin: 0 auto; padding: 18px; }}
 
                 .fuyou-card {{
                     background: white;
                     border-radius: 14px;
-                    padding: 16px;
-                    margin-bottom: 14px;
+                    padding: 16px 20px;
+                    margin-bottom: 16px;
                     box-shadow: 0 2px 6px rgba(0,0,0,0.04);
                     border-left: 5px solid #2563eb;
                 }}
-                .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #1e293b; display: flex; justify-content: space-between; }}
-                .fuyou-meter-bg {{ background: #e2e8f0; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
-                .fuyou-meter-bar {{ background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444); height: 100%; border-radius: 5px; }}
-                .fuyou-desc {{ font-size: 0.78rem; color: #64748b; display: flex; justify-content: space-between; }}
+                .fuyou-title {{ font-size: 0.9rem; font-weight: 700; color: #1e293b; display: flex; justify-content: space-between; }}
+                .fuyou-meter-bg {{ background: #e2e8f0; height: 11px; border-radius: 6px; margin: 10px 0 8px 0; overflow: hidden; }}
+                .fuyou-meter-bar {{ background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444); height: 100%; border-radius: 6px; }}
+                .fuyou-desc {{ font-size: 0.82rem; color: #64748b; display: flex; justify-content: space-between; }}
 
-                .all-time-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); color: white; border-radius: 16px; padding: 18px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-                .all-time-title {{ font-size: 0.75rem; color: #94a3b8; letter-spacing: 0.5px; margin-bottom: 4px; }}
-                .all-time-balance {{ font-size: 2.1rem; font-weight: 800; color: {bal_color}; }}
-                .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.12); font-size: 0.82rem; }}
-                .all-time-grid span {{ color: #94a3b8; display: block; font-size: 0.72rem; }}
+                .all-time-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); color: white; border-radius: 16px; padding: 20px 24px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.1); }}
+                .all-time-title {{ font-size: 0.8rem; color: #94a3b8; letter-spacing: 0.5px; margin-bottom: 4px; }}
+                .all-time-balance {{ font-size: 2.3rem; font-weight: 800; color: {bal_color}; }}
+                .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.12); font-size: 0.9rem; }}
+                .all-time-grid span {{ color: #94a3b8; display: block; font-size: 0.75rem; }}
 
-                .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.03); }}
-                .month-nav a {{ text-decoration: none; color: #2563eb; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #eff6ff; }}
-                .current-month {{ font-size: 1.15rem; font-weight: 800; color: #0f172a; }}
+                .chart-card {{ background: white; border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
+                .chart-title {{ font-size: 0.95rem; font-weight: 700; color: #1e293b; margin-bottom: 14px; }}
+                .chart-scroll-box {{ width: 100%; overflow-x: auto; padding-bottom: 6px; }}
+                .chart-inner-wrap {{ min-width: 600px; height: 210px; }}
 
-                .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
-                .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
-                .summary-main-label {{ font-size: 0.78rem; color: #64748b; margin-bottom: 2px; }}
-                .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #10b981; }}
-                .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
-                .summary-sub-label {{ font-size: 0.75rem; color: #64748b; }}
-                .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 2px; }}
+                .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 20px; margin-bottom: 16px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.03); }}
+                .month-nav a {{ text-decoration: none; color: #2563eb; font-size: 0.9rem; font-weight: 700; padding: 7px 16px; border-radius: 8px; background: #eff6ff; }}
+                .current-month {{ font-size: 1.2rem; font-weight: 800; color: #0f172a; }}
+
+                .summary-card {{ background: white; border-radius: 14px; padding: 18px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 16px; }}
+                .summary-main {{ text-align: center; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px dashed #e2e8f0; }}
+                .summary-main-label {{ font-size: 0.8rem; color: #64748b; margin-bottom: 2px; }}
+                .summary-main-val {{ font-size: 1.9rem; font-weight: 800; color: #10b981; }}
+                .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; text-align: center; }}
+                .summary-sub-label {{ font-size: 0.78rem; color: #64748b; }}
+                .summary-sub-val {{ font-size: 1.2rem; font-weight: 700; margin-top: 2px; }}
                 .val-expense {{ color: #ef4444; }}
                 .val-balance {{ color: #0284c7; }}
-
-                .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
-                .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #1e293b; margin-bottom: 12px; }}
 
                 .category-list {{ margin-top: 14px; border-top: 1px solid #f1f5f9; padding-top: 10px; }}
                 .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f8fafc; }}
                 .cat-row:last-child {{ border-bottom: none; }}
                 .cat-row-left {{ display: flex; align-items: center; gap: 8px; }}
                 .cat-color-dot {{ width: 12px; height: 12px; border-radius: 50%; display: inline-block; }}
-                .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #1e293b; }}
-                .cat-row-right {{ display: flex; align-items: center; gap: 12px; }}
-                .cat-row-pct {{ font-size: 0.8rem; color: #64748b; min-width: 42px; text-align: right; }}
-                .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #0f172a; min-width: 75px; text-align: right; }}
+                .cat-row-name {{ font-size: 0.9rem; font-weight: 600; color: #1e293b; }}
+                .cat-row-right {{ display: flex; align-items: center; gap: 14px; }}
+                .cat-row-pct {{ font-size: 0.82rem; color: #64748b; min-width: 44px; text-align: right; }}
+                .cat-row-amt {{ font-size: 0.95rem; font-weight: 700; color: #0f172a; min-width: 80px; text-align: right; }}
 
-                .section-title {{ font-size: 0.92rem; font-weight: 700; color: #475569; margin: 18px 0 10px 4px; }}
-                .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }}
+                .section-title {{ font-size: 0.95rem; font-weight: 700; color: #475569; margin: 20px 0 12px 4px; }}
+                .record-card {{ background: white; border-radius: 12px; padding: 13px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }}
                 .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
-                .record-title {{ font-size: 0.92rem; font-weight: 700; color: #0f172a; margin-left: 2px; }}
-                .record-date {{ font-size: 0.7rem; color: #94a3b8; }}
-                .record-detail {{ font-size: 0.72rem; color: #64748b; }}
-                .badge {{ font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
+                .record-title {{ font-size: 0.95rem; font-weight: 700; color: #0f172a; margin-left: 2px; }}
+                .record-date {{ font-size: 0.72rem; color: #94a3b8; }}
+                .record-detail {{ font-size: 0.75rem; color: #64748b; }}
+                .badge {{ font-size: 0.68rem; padding: 2px 7px; border-radius: 4px; font-weight: 700; width: fit-content; }}
                 .badge-income {{ background: #ecfdf5; color: #059669; }}
                 .badge-expense {{ background: #fef2f2; color: #dc2626; }}
-                .record-right {{ display: flex; align-items: center; gap: 10px; }}
-                .record-amount {{ font-size: 1rem; font-weight: 800; white-space: nowrap; }}
+                .record-right {{ display: flex; align-items: center; gap: 12px; }}
+                .record-amount {{ font-size: 1.05rem; font-weight: 800; white-space: nowrap; }}
                 .amount-income {{ color: #059669; }}
                 .amount-expense {{ color: #dc2626; }}
-                .delete-btn {{ background: none; border: none; color: #cbd5e1; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
+                .delete-btn {{ background: none; border: none; color: #cbd5e1; cursor: pointer; font-size: 0.9rem; padding: 4px; }}
                 .delete-btn:hover {{ color: #dc2626; }}
-                .empty-state {{ text-align: center; padding: 24px; color: #94a3b8; font-size: 0.85rem; background: white; border-radius: 12px; }}
+                .empty-state {{ text-align: center; padding: 26px; color: #94a3b8; font-size: 0.88rem; background: white; border-radius: 12px; }}
 
                 .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
-                .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
-                .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #0f172a; display: flex; justify-content: space-between; }}
-                .form-group {{ margin-bottom: 12px; }}
-                .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
+                .modal-content {{ background: white; border-radius: 16px; padding: 24px; width: 100%; max-width: 460px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
+                .modal-title {{ font-size: 1.15rem; font-weight: 700; margin-bottom: 16px; color: #0f172a; display: flex; justify-content: space-between; }}
+                .form-group {{ margin-bottom: 14px; }}
+                .form-label {{ display: block; font-size: 0.78rem; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
                 .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
                 .form-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
                 .btn-submit {{ width: 100%; background: #2563eb; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
-                .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #94a3b8; }}
+                .btn-close {{ background: none; border: none; font-size: 1.3rem; cursor: pointer; color: #94a3b8; }}
             </style>
         </head>
         <body>
             <div class="header">
                 <h1>家計簿 & シフト管理</h1>
                 <div class="header-actions">
-                    <button class="btn-action btn-sync" onclick="location.href='/sync-past'">📥 過去データ同期</button>
                     <button class="btn-action btn-add" onclick="openModal()">➕ 手入力</button>
-                    <button class="btn-action btn-reload" onclick="forceReload()">🔄</button>
+                    <button class="btn-action btn-reload" onclick="forceReload()">🔄 更新</button>
                 </div>
             </div>
 
@@ -787,7 +815,7 @@ def dashboard(month: str | None = None):
                         <div class="fuyou-meter-bar" style="width: {pct_103}%;"></div>
                     </div>
                     <div class="fuyou-desc">
-                        <span>累計収入: ¥{ytd_income_2026:,}</span>
+                        <span>2026年累計収入: ¥{ytd_income_2026:,}</span>
                         <span>103万まで残り: <strong>¥{max(0, rem_103):,}</strong></span>
                     </div>
                 </div>
@@ -808,8 +836,12 @@ def dashboard(month: str | None = None):
                 </div>
 
                 <div class="chart-card">
-                    <div class="chart-title">📊 月別 収支推移（収入 vs 支出）</div>
-                    <canvas id="monthlyTrendChart" height="150"></canvas>
+                    <div class="chart-title">📊 全期間 月別収支推移（パノラマ表示）</div>
+                    <div class="chart-scroll-box">
+                        <div class="chart-inner-wrap">
+                            <canvas id="monthlyTrendChart"></canvas>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="month-nav">
@@ -973,6 +1005,7 @@ def dashboard(month: str | None = None):
                     }}
                 }}
 
+                // 全期間パノラマバーグラフ
                 const trendCtx = document.getElementById('monthlyTrendChart').getContext('2d');
                 new Chart(trendCtx, {{
                     type: 'bar',
@@ -995,6 +1028,7 @@ def dashboard(month: str | None = None):
                     }},
                     options: {{
                         responsive: true,
+                        maintainAspectRatio: false,
                         plugins: {{
                             legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }}
                         }},
@@ -1007,6 +1041,7 @@ def dashboard(month: str | None = None):
                     }}
                 }});
 
+                // カテゴリ別支出ドーナツチャート
                 const catCanvas = document.getElementById('categoryChart');
                 if (catCanvas) {{
                     new Chart(catCanvas.getContext('2d'), {{
