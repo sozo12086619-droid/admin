@@ -153,9 +153,6 @@ def add_event_to_calendar(parsed):
     }
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
-# -------------------------------------------------------------
-# 店名からカテゴリを推測
-# -------------------------------------------------------------
 def guess_category(title: str) -> str:
     t = title.lower()
     if any(k in t for k in ["すき家", "サンエー", "セブン", "ファミリーマート", "ファミマ", "ローソン", "ミスタードーナツ", "ミスド", "マック", "スーパー", "食堂", "カフェ", "弁当"]):
@@ -168,19 +165,13 @@ def guess_category(title: str) -> str:
         return "交通費"
     return "その他"
 
-# -------------------------------------------------------------
-# テキストから支出行を解析
-# -------------------------------------------------------------
 def parse_expense_text(text: str):
-    # シフト形式（時間範囲）が含まれる行はスキップ
     if re.search(r'\d{1,2}(?::\d{2})?\s*[-〜~～]\s*\d{1,2}', text):
         return None
 
-    # 合計や件数まとめ行はスキップ
     if re.search(r'^(?:合計|小計|PayPay|VISAデビット)\s*[\d,]+円?\s*(?:\(\d+件\))?$', text.strip()):
         return None
 
-    # 日付 + 店名 + 金額（例: 9/1 Appleサービス 1,180円）
     match = re.search(r'(?:(\d{4})[/-年])?\s*(\d{1,2})[/-月](\d{1,2})日?\s+(.+?)\s+([0-9,]+)\s*円?$', text.strip())
     if not match:
         return None
@@ -210,9 +201,6 @@ def parse_expense_text(text: str):
         "category": category
     }
 
-# -------------------------------------------------------------
-# 支出画像解析（Gemini API）
-# -------------------------------------------------------------
 def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
@@ -278,7 +266,7 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
             raise Exception(f"HTTP {he.code}: {err_msg}")
 
 # -------------------------------------------------------------
-# 家計簿ダッシュボード（Web画面）
+# 家計簿ダッシュボード（視覚化＆グラフ完全対応）
 # -------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(month: str | None = None):
@@ -291,7 +279,62 @@ def dashboard(month: str | None = None):
     next_month_str = next_dt.strftime("%Y-%m")
     year_str, month_str = target_month.split("-")
 
+    # 1. 選択月のサマリー
     summary = db.fetch_monthly_money_summary(target_month, USER_ID)
+
+    # 2. 全期間の通算収支
+    all_time_rows = db.query(
+        """
+        SELECT record_type, COALESCE(SUM(amount), 0) as total
+        FROM public.money_records
+        WHERE user_id = %s
+        GROUP BY record_type
+        """,
+        (USER_ID,)
+    )
+    all_time_income = 0
+    all_time_expense = 0
+    for row in all_time_rows:
+        if row["record_type"] == "income":
+            all_time_income = int(row["total"])
+        elif row["record_type"] == "expense":
+            all_time_expense = int(row["total"])
+    all_time_balance = all_time_income - all_time_expense
+
+    # 3. 月別推移（直近12ヶ月分）
+    monthly_trends = db.query(
+        """
+        SELECT 
+            SUBSTRING(record_date, 1, 7) as ym,
+            COALESCE(SUM(CASE WHEN record_type = 'income' THEN amount ELSE 0 END), 0) as inc,
+            COALESCE(SUM(CASE WHEN record_type = 'expense' THEN amount ELSE 0 END), 0) as exp
+        FROM public.money_records
+        WHERE user_id = %s
+        GROUP BY SUBSTRING(record_date, 1, 7)
+        ORDER BY ym ASC
+        LIMIT 12
+        """,
+        (USER_ID,)
+    )
+    trend_labels = [r["ym"] for r in monthly_trends]
+    trend_incomes = [int(r["inc"]) for r in monthly_trends]
+    trend_expenses = [int(r["exp"]) for r in monthly_trends]
+
+    # 4. 当月のカテゴリ別支出内訳
+    category_rows = db.query(
+        """
+        SELECT category, COALESCE(SUM(amount), 0) as cat_total
+        FROM public.money_records
+        WHERE user_id = %s AND record_date LIKE %s AND record_type = 'expense'
+        GROUP BY category
+        ORDER BY cat_total DESC
+        """,
+        (USER_ID, f"{target_month}%")
+    )
+    cat_labels = [r["category"] for r in category_rows]
+    cat_data = [int(r["cat_total"]) for r in category_rows]
+
+    # 5. 当月の取引レコード一覧
     records = db.query(
         """
         SELECT * FROM public.money_records
@@ -332,57 +375,98 @@ def dashboard(month: str | None = None):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>家計簿 & シフト管理</title>
+        <title>家計簿 & シフト管理ダッシュボード</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-            body {{ background-color: #f7f8fa; color: #333; padding-bottom: 40px; }}
-            .header {{ background: #2c3e50; color: white; padding: 18px 20px; text-align: center; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-            .header h1 {{ font-size: 1.1rem; font-weight: 600; letter-spacing: 0.5px; }}
-            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 20px; margin-bottom: 16px; border-bottom: 1px solid #eee; }}
-            .month-nav a {{ text-decoration: none; color: #3498db; font-size: 0.95rem; font-weight: bold; padding: 6px 12px; border-radius: 6px; background: #edf5fc; }}
-            .current-month {{ font-size: 1.2rem; font-weight: 700; color: #2c3e50; }}
-            .container {{ max-width: 500px; margin: 0 auto; padding: 0 16px; }}
+            body {{ background-color: #f4f6f9; color: #333; padding-bottom: 50px; }}
+            .header {{ background: #1e293b; color: white; padding: 16px 20px; text-align: center; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            .header h1 {{ font-size: 1.15rem; font-weight: 700; letter-spacing: 0.5px; }}
             
-            .summary-card {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 3px 12px rgba(0,0,0,0.04); margin-bottom: 20px; }}
-            .summary-main {{ text-align: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px dashed #eee; }}
-            .summary-main-label {{ font-size: 0.85rem; color: #7f8c8d; margin-bottom: 4px; }}
-            .summary-main-val {{ font-size: 2rem; font-weight: 800; color: #27ae60; }}
-            .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; text-align: center; }}
-            .summary-sub-label {{ font-size: 0.8rem; color: #7f8c8d; }}
-            .summary-sub-val {{ font-size: 1.15rem; font-weight: 700; margin-top: 4px; }}
-            .val-expense {{ color: #e74c3c; }}
-            .val-balance {{ color: #2980b9; }}
-            
-            .section-title {{ font-size: 0.95rem; font-weight: 700; color: #555; margin-bottom: 10px; padding-left: 4px; }}
-            .record-card {{ background: white; border-radius: 12px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }}
-            .record-left {{ display: flex; flex-direction: column; gap: 4px; }}
-            .record-title {{ font-size: 1rem; font-weight: 700; color: #2c3e50; margin-left: 4px; }}
-            .record-date {{ font-size: 0.75rem; color: #95a5a6; }}
-            .record-detail {{ font-size: 0.78rem; color: #7f8c8d; margin-top: 2px; }}
-            .badge {{ font-size: 0.7rem; padding: 2px 7px; border-radius: 4px; font-weight: bold; width: fit-content; }}
-            .badge-income {{ background: #e8f8f0; color: #27ae60; }}
-            .badge-expense {{ background: #fdf0ee; color: #e74c3c; }}
-            .record-amount {{ font-size: 1.1rem; font-weight: 800; white-space: nowrap; }}
-            .amount-income {{ color: #27ae60; }}
-            .amount-expense {{ color: #e74c3c; }}
-            .empty-state {{ text-align: center; padding: 30px; color: #bdc3c7; font-size: 0.9rem; background: white; border-radius: 12px; }}
+            .container {{ max-width: 550px; margin: 0 auto; padding: 16px; }}
+
+            /* 全期間サマリー */
+            .all-time-card {{ background: linear-gradient(135deg, #1e293b, #334155); color: white; border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(30,41,59,0.15); }}
+            .all-time-title {{ font-size: 0.8rem; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
+            .all-time-balance {{ font-size: 2.1rem; font-weight: 800; color: {'#38bdf8' if all_time_balance >= 0 else '#f87171'}; }}
+            .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.85rem; }}
+            .all-time-grid span {{ color: #94a3b8; display: block; font-size: 0.75rem; }}
+
+            /* 月ナビゲーション */
+            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }}
+            .month-nav a {{ text-decoration: none; color: #2563eb; font-size: 0.9rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #eff6ff; }}
+            .current-month {{ font-size: 1.15rem; font-weight: 700; color: #0f172a; }}
+
+            /* 当月カード */
+            .summary-card {{ background: white; border-radius: 14px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px; }}
+            .summary-main {{ text-align: center; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px dashed #e2e8f0; }}
+            .summary-main-label {{ font-size: 0.8rem; color: #64748b; margin-bottom: 4px; }}
+            .summary-main-val {{ font-size: 1.8rem; font-weight: 800; color: #10b981; }}
+            .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
+            .summary-sub-label {{ font-size: 0.75rem; color: #64748b; }}
+            .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 3px; }}
+            .val-expense {{ color: #ef4444; }}
+            .val-balance {{ color: #0284c7; }}
+
+            /* グラフカード */
+            .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }}
+            .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #334155; margin-bottom: 12px; }}
+
+            /* リスト一覧 */
+            .section-title {{ font-size: 0.95rem; font-weight: 700; color: #475569; margin: 18px 0 10px 4px; }}
+            .record-card {{ background: white; border-radius: 12px; padding: 13px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
+            .record-left {{ display: flex; flex-direction: column; gap: 3px; }}
+            .record-title {{ font-size: 0.95rem; font-weight: 700; color: #1e293b; margin-left: 3px; }}
+            .record-date {{ font-size: 0.72rem; color: #94a3b8; }}
+            .record-detail {{ font-size: 0.75rem; color: #64748b; margin-top: 1px; }}
+            .badge {{ font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
+            .badge-income {{ background: #ecfdf5; color: #059669; }}
+            .badge-expense {{ background: #fef2f2; color: #dc2626; }}
+            .record-amount {{ font-size: 1.05rem; font-weight: 800; white-space: nowrap; }}
+            .amount-income {{ color: #059669; }}
+            .amount-expense {{ color: #dc2626; }}
+            .empty-state {{ text-align: center; padding: 26px; color: #94a3b8; font-size: 0.85rem; background: white; border-radius: 12px; }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>家計簿 & シフト管理</h1>
         </div>
-        
-        <div class="month-nav">
-            <a href="/?month={prev_month_str}">◀ 前月</a>
-            <div class="current-month">{year_str}年 {month_str}月</div>
-            <a href="/?month={next_month_str}">翌月 ▶</a>
-        </div>
-        
+
         <div class="container">
+            <!-- 全期間の通算収支 -->
+            <div class="all-time-card">
+                <div class="all-time-title">💰 全期間の通算残高（総収支）</div>
+                <div class="all-time-balance">¥{all_time_balance:,}</div>
+                <div class="all-time-grid">
+                    <div>
+                        <span>通算総収入</span>
+                        <strong>+¥{all_time_income:,}</strong>
+                    </div>
+                    <div>
+                        <span>通算総支出</span>
+                        <strong style="color: #fca5a5;">-¥{all_time_expense:,}</strong>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 月別推移グラフ -->
+            <div class="chart-card">
+                <div class="chart-title">📊 月別 収支推移</div>
+                <canvas id="monthlyTrendChart" height="150"></canvas>
+            </div>
+
+            <!-- 当月のナビゲーション -->
+            <div class="month-nav">
+                <a href="/?month={prev_month_str}">◀ 前月</a>
+                <div class="current-month">{year_str}年 {month_str}月</div>
+                <a href="/?month={next_month_str}">翌月 ▶</a>
+            </div>
+
+            <!-- 当月のサマリーカード -->
             <div class="summary-card">
                 <div class="summary-main">
-                    <div class="summary-main-label">バイト給料（見込み合計）</div>
+                    <div class="summary-main-label">{month_str}月 バイト給料（見込）</div>
                     <div class="summary-main-val">¥{summary["total_income"]:,}</div>
                 </div>
                 <div class="summary-grid">
@@ -396,10 +480,77 @@ def dashboard(month: str | None = None):
                     </div>
                 </div>
             </div>
-            
-            <div class="section-title">登録済みのシフト・収支一覧</div>
+
+            <!-- 当月のカテゴリ別支出内訳グラフ -->
+            {f'''
+            <div class="chart-card">
+                <div class="chart-title">🍩 {month_str}月 支出内訳</div>
+                <canvas id="categoryChart" height="140"></canvas>
+            </div>
+            ''' if cat_data else ''}
+
+            <!-- 履歴リスト -->
+            <div class="section-title">登録済みのシフト・収支一覧（{len(records)}件）</div>
             {records_html}
         </div>
+
+        <script>
+            // 月別推移バーチャート
+            const trendCtx = document.getElementById('monthlyTrendChart').getContext('2d');
+            new Chart(trendCtx, {{
+                type: 'bar',
+                data: {{
+                    labels: {json.dumps(trend_labels)},
+                    datasets: [
+                        {{
+                            label: '収入',
+                            data: {json.dumps(trend_incomes)},
+                            backgroundColor: '#10b981',
+                            borderRadius: 4
+                        }},
+                        {{
+                            label: '支出',
+                            data: {json.dumps(trend_expenses)},
+                            backgroundColor: '#ef4444',
+                            borderRadius: 4
+                        }}
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }}
+                    }},
+                    scales: {{
+                        y: {{
+                            beginAtZero: true,
+                            ticks: {{ callback: function(val) {{ return '¥' + val.toLocaleString(); }} }}
+                        }}
+                    }}
+                }}
+            }});
+
+            // カテゴリ別支出ドーナツチャート
+            const catCanvas = document.getElementById('categoryChart');
+            if (catCanvas) {{
+                new Chart(catCanvas.getContext('2d'), {{
+                    type: 'doughnut',
+                    data: {{
+                        labels: {json.dumps(cat_labels)},
+                        datasets: [{{
+                            data: {json.dumps(cat_data)},
+                            backgroundColor: ['#3b82f6', '#ec4899', '#f59e0b', '#10b981', '#8b5cf6', '#64748b']
+                        }}]
+                    }},
+                    options: {{
+                        responsive: true,
+                        plugins: {{
+                            legend: {{ position: 'right', labels: {{ boxWidth: 12, font: {{ size: 11 }} }} }}
+                        }}
+                    }}
+                }});
+            }}
+        </script>
     </body>
     </html>
     """
@@ -415,9 +566,6 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return "OK"
 
-# -------------------------------------------------------------
-# テキストメッセージ処理（シフト登録 ＆ 支出テキスト一括登録 ＆ メモ保存）
-# -------------------------------------------------------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     text = event.message.text.strip()
@@ -430,12 +578,10 @@ def handle_text_message(event):
 
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     
-    # 1. シフトの判定
     calendar_success = []
     calendar_error = None
     total_expected_salary = 0
 
-    # 2. 支出テキストの判定
     expense_success = []
     skipped_expense_count = 0
     total_expense_amount = 0
@@ -470,7 +616,6 @@ def handle_text_message(event):
         parsed_exp = parse_expense_text(line)
         if parsed_exp:
             try:
-                # 重複防止チェック
                 existing = db.query(
                     """
                     SELECT id FROM public.money_records 
@@ -499,7 +644,6 @@ def handle_text_message(event):
             except Exception as e:
                 print(f"Expense DB Error: {e}")
 
-    # 返信メッセージの組み立て
     reply_lines = []
 
     if expense_success or skipped_expense_count > 0:
@@ -545,9 +689,6 @@ def handle_text_message(event):
             )
         )
 
-# -------------------------------------------------------------
-# 画像メッセージ処理
-# -------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     try:
