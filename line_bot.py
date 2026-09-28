@@ -159,27 +159,36 @@ PAST_RECORDS_DATA = [
     ("2026-08-31", "income", "給料", "給料まとめ", 117308),
 ]
 
+def do_sync():
+    # RETURNING id を指定することで no results to fetch を完全防止
+    db.query(
+        "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ' RETURNING id",
+        (USER_ID,)
+    )
+    for rec_date, r_type, cat, title, amt in PAST_RECORDS_DATA:
+        db.insert_money_record(
+            record_date=rec_date,
+            record_type=r_type,
+            category=cat,
+            title=title,
+            amount=amt,
+            status="confirmed",
+            detail="過去アプリより引き継ぎ",
+            user_id=USER_ID
+        )
+
+try:
+    do_sync()
+except Exception as e:
+    print(f"Auto sync error: {e}")
+
 @app.get("/sync-past")
 def sync_past_data_endpoint():
     try:
-        db.query(
-            "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
-            (USER_ID,)
-        )
-        for rec_date, r_type, cat, title, amt in PAST_RECORDS_DATA:
-            db.insert_money_record(
-                record_date=rec_date,
-                record_type=r_type,
-                category=cat,
-                title=title,
-                amount=amt,
-                status="confirmed",
-                detail="過去アプリより引き継ぎ",
-                user_id=USER_ID
-            )
+        do_sync()
         return RedirectResponse(url="/?_t=" + str(int(time.time())))
     except Exception as e:
-        return HTMLResponse(f"<h3>同期エラー: {e}</h3>")
+        return HTMLResponse(f"<h3>同期エラー: {e}</h3><pre>{traceback.format_exc()}</pre>")
 
 def get_calendar_service():
     if not os.path.exists(CREDENTIALS_PATH):
@@ -440,7 +449,7 @@ async def add_manual_record(req: Request):
 async def delete_record(record_id: int):
     try:
         db.query(
-            "DELETE FROM public.money_records WHERE id = %s AND user_id = %s",
+            "DELETE FROM public.money_records WHERE id = %s AND user_id = %s RETURNING id",
             (record_id, USER_ID)
         )
         return JSONResponse({"status": "success"})
@@ -531,7 +540,7 @@ def dashboard(month: str | None = None):
             trend_incomes.append(int(inc_val or 0))
             trend_expenses.append(int(exp_val or 0))
 
-        # 5. 当月のカテゴリ別支出内訳 & カラーパレット
+        # 5. 当月のカテゴリ別支出内訳 & 鮮やかなカラーパレット
         category_rows = db.query(
             """
             SELECT category, COALESCE(SUM(amount), 0) as cat_total
