@@ -154,47 +154,17 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
-# 候補モデル一覧を取得（混雑時の予備モデルも含む）
-# -------------------------------------------------------------
-def get_candidate_models() -> list[str]:
-    clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
-    if not clean_key:
-        raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
-
-    models = ["models/gemini-3.8-flash", "models/gemini-2.0-flash", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
-    try:
-        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}".strip("[] \t\r\n'\"")
-        req = urllib.request.Request(list_url, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as res:
-            res_data = json.loads(res.read().decode("utf-8"))
-            available = [
-                m["name"] for m in res_data.get("models", [])
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-            ordered = []
-            for p in ["gemini-3.8-flash", "gemini-3-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
-                for a in available:
-                    if p in a and a not in ordered:
-                        ordered.append(a)
-            for a in available:
-                if "flash" in a.lower() and a not in ordered:
-                    ordered.append(a)
-            if ordered:
-                return ordered
-    except Exception as e:
-        print(f"ListModels Warning: {e}")
-
-    return models
-
-# -------------------------------------------------------------
-# 支出画像解析（混雑時自動フォールバック付き）
+# 支出画像解析（混雑時自動リトライ付き）
 # -------------------------------------------------------------
 def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    models = get_candidate_models()
+    # 最新の正規モデル
+    model_name = "models/gemini-3.8-flash"
+    target_url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
+
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     now_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -237,15 +207,16 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
         }
     }
 
-    last_error = None
-    for model_name in models:
-        target_url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
-        req = urllib.request.Request(
-            target_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
+    req = urllib.request.Request(
+        target_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    # 混雑（503等）が発生した場合は自動で2〜3回再試行する
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
             with urllib.request.urlopen(req, timeout=30) as res:
                 res_data = json.loads(res.read().decode("utf-8"))
@@ -260,18 +231,18 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
                 return []
         except urllib.error.HTTPError as he:
             err_msg = he.read().decode("utf-8", errors="ignore")
-            last_error = f"HTTP {he.code}: {err_msg}"
-            # 503（混雑）または 404（不在）の場合は次の候補モデルへ即座にフォールバック
-            if he.code in [503, 404, 429]:
-                print(f"Model {model_name} busy ({he.code}), falling back to next model...")
-                time.sleep(1)
+            # 混雑時（503や429）は数秒待機してリトライ
+            if he.code in [503, 429] and attempt < max_retries - 1:
+                time.sleep(attempt + 2)
                 continue
-            raise Exception(last_error)
+            raise Exception(f"HTTP {he.code}: {err_msg}")
         except Exception as e:
-            last_error = str(e)
-            continue
+            if attempt < max_retries - 1:
+                time.sleep(attempt + 2)
+                continue
+            raise e
 
-    raise Exception(last_error or "すべてのAIモデルが混雑中です。少し待ってから再度送信してください。")
+    raise Exception("Google AIサーバーが現在混雑しています。1分ほど置いてから再度お試しください。")
 
 # -------------------------------------------------------------
 # 家計簿ダッシュボード（Web画面）
