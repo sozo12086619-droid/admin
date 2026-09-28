@@ -8,7 +8,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -49,126 +49,124 @@ if not os.path.exists(CREDENTIALS_PATH):
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# -------------------------------------------------------------
-# 過去アプリの収支データ完全同期（支出 & 収入）
-# -------------------------------------------------------------
-def sync_past_app_data():
-    past_records = [
-        # --- 2025年 支出 ---
-        ("2025-07-31", "expense", "食費", "食費", 33988),
-        ("2025-07-31", "expense", "日用品", "日用品", 880),
-        ("2025-07-31", "expense", "交通費", "交通費", 3100),
-        ("2025-07-31", "expense", "衣服", "衣服", 4200),
-        ("2025-07-31", "expense", "趣味", "趣味", 37900),
-        ("2025-07-31", "expense", "その他", "その他", 560),
+PAST_RECORDS_DATA = [
+    # --- 2025年 支出 ---
+    ("2025-07-31", "expense", "食費", "食費", 33988),
+    ("2025-07-31", "expense", "日用品", "日用品", 880),
+    ("2025-07-31", "expense", "交通費", "交通費", 3100),
+    ("2025-07-31", "expense", "衣服", "衣服", 4200),
+    ("2025-07-31", "expense", "趣味", "趣味", 37900),
+    ("2025-07-31", "expense", "その他", "その他", 560),
 
-        ("2025-08-31", "expense", "食費", "食費", 47474),
-        ("2025-08-31", "expense", "日用品", "日用品", 3077),
-        ("2025-08-31", "expense", "交通費", "交通費", 2800),
-        ("2025-08-31", "expense", "交際費", "交際費", 6080),
-        ("2025-08-31", "expense", "趣味", "趣味", 144656),
-        ("2025-08-31", "expense", "その他", "その他", 2884),
+    ("2025-08-31", "expense", "食費", "食費", 47474),
+    ("2025-08-31", "expense", "日用品", "日用品", 3077),
+    ("2025-08-31", "expense", "交通費", "交通費", 2800),
+    ("2025-08-31", "expense", "交際費", "交際費", 6080),
+    ("2025-08-31", "expense", "趣味", "趣味", 144656),
+    ("2025-08-31", "expense", "その他", "その他", 2884),
 
-        ("2025-09-30", "expense", "食費", "食費", 27374),
-        ("2025-09-30", "expense", "外食費", "外食費", 3834),
-        ("2025-09-30", "expense", "日用品", "日用品", 12800),
-        ("2025-09-30", "expense", "趣味", "趣味", 90679),
-        ("2025-09-30", "expense", "自分磨き", "自分磨き", 400),
+    ("2025-09-30", "expense", "食費", "食費", 27374),
+    ("2025-09-30", "expense", "外食費", "外食費", 3834),
+    ("2025-09-30", "expense", "日用品", "日用品", 12800),
+    ("2025-09-30", "expense", "趣味", "趣味", 90679),
+    ("2025-09-30", "expense", "自分磨き", "自分磨き", 400),
 
-        ("2025-10-31", "expense", "食費", "食費", 14201),
-        ("2025-10-31", "expense", "日用品", "日用品", 12777),
-        ("2025-10-31", "expense", "趣味", "趣味", 34438),
-        ("2025-10-31", "expense", "自分磨き", "自分磨き", 102387),
-        ("2025-10-31", "expense", "その他", "その他", 41191),
+    ("2025-10-31", "expense", "食費", "食費", 14201),
+    ("2025-10-31", "expense", "日用品", "日用品", 12777),
+    ("2025-10-31", "expense", "趣味", "趣味", 34438),
+    ("2025-10-31", "expense", "自分磨き", "自分磨き", 102387),
+    ("2025-10-31", "expense", "その他", "その他", 41191),
 
-        ("2025-11-30", "expense", "食費", "食費", 10010),
-        ("2025-11-30", "expense", "日用品", "日用品", 21950),
-        ("2025-11-30", "expense", "交際費", "交際費", 570),
-        ("2025-11-30", "expense", "趣味", "趣味", 55694),
-        ("2025-11-30", "expense", "自分磨き", "自分磨き", 55398),
-        ("2025-11-30", "expense", "その他", "その他", 50000),
+    ("2025-11-30", "expense", "食費", "食費", 10010),
+    ("2025-11-30", "expense", "日用品", "日用品", 21950),
+    ("2025-11-30", "expense", "交際費", "交際費", 570),
+    ("2025-11-30", "expense", "趣味", "趣味", 55694),
+    ("2025-11-30", "expense", "自分磨き", "自分磨き", 55398),
+    ("2025-11-30", "expense", "その他", "その他", 50000),
 
-        ("2025-12-31", "expense", "食費", "食費", 6799),
-        ("2025-12-31", "expense", "日用品", "日用品", 1288),
-        ("2025-12-31", "expense", "交際費", "交際費", 4310),
-        ("2025-12-31", "expense", "趣味", "趣味", 28093),
-        ("2025-12-31", "expense", "自分磨き", "自分磨き", 80791),
+    ("2025-12-31", "expense", "食費", "食費", 6799),
+    ("2025-12-31", "expense", "日用品", "日用品", 1288),
+    ("2025-12-31", "expense", "交際費", "交際費", 4310),
+    ("2025-12-31", "expense", "趣味", "趣味", 28093),
+    ("2025-12-31", "expense", "自分磨き", "自分磨き", 80791),
 
-        # --- 2026年 支出 ---
-        ("2026-01-31", "expense", "食費", "食費", 63458),
-        ("2026-01-31", "expense", "日用品", "日用品", 6229),
-        ("2026-01-31", "expense", "趣味", "趣味", 122890),
-        ("2026-01-31", "expense", "その他", "その他", 750),
+    # --- 2026年 支出 ---
+    ("2026-01-31", "expense", "食費", "食費", 63458),
+    ("2026-01-31", "expense", "日用品", "日用品", 6229),
+    ("2026-01-31", "expense", "趣味", "趣味", 122890),
+    ("2026-01-31", "expense", "その他", "その他", 750),
 
-        ("2026-02-28", "expense", "食費", "食費", 14517),
-        ("2026-02-28", "expense", "外食費", "外食費", 1419),
-        ("2026-02-28", "expense", "日用品", "日用品", 6328),
-        ("2026-02-28", "expense", "交際費", "交際費", 2234),
-        ("2026-02-28", "expense", "趣味", "趣味", 34789),
-        ("2026-02-28", "expense", "自分磨き", "自分磨き", 30800),
-        ("2026-02-28", "expense", "その他", "その他", 510),
+    ("2026-02-28", "expense", "食費", "食費", 14517),
+    ("2026-02-28", "expense", "外食費", "外食費", 1419),
+    ("2026-02-28", "expense", "日用品", "日用品", 6328),
+    ("2026-02-28", "expense", "交際費", "交際費", 2234),
+    ("2026-02-28", "expense", "趣味", "趣味", 34789),
+    ("2026-02-28", "expense", "自分磨き", "自分磨き", 30800),
+    ("2026-02-28", "expense", "その他", "その他", 510),
 
-        ("2026-03-31", "expense", "食費", "食費", 19161),
-        ("2026-03-31", "expense", "日用品", "日用品", 7574),
-        ("2026-03-31", "expense", "交際費", "交際費", 10650),
-        ("2026-03-31", "expense", "趣味", "趣味", 71000),
-        ("2026-03-31", "expense", "その他", "その他", 9765),
+    ("2026-03-31", "expense", "食費", "食費", 19161),
+    ("2026-03-31", "expense", "日用品", "日用品", 7574),
+    ("2026-03-31", "expense", "交際費", "交際費", 10650),
+    ("2026-03-31", "expense", "趣味", "趣味", 71000),
+    ("2026-03-31", "expense", "その他", "その他", 9765),
 
-        ("2026-04-30", "expense", "食費", "食費", 17317),
-        ("2026-04-30", "expense", "日用品", "日用品", 8999),
-        ("2026-04-30", "expense", "趣味", "趣味", 2500),
-        ("2026-04-30", "expense", "自分磨き", "自分磨き", 34920),
-        ("2026-04-30", "expense", "その他", "その他", 16483),
+    ("2026-04-30", "expense", "食費", "食費", 17317),
+    ("2026-04-30", "expense", "日用品", "日用品", 8999),
+    ("2026-04-30", "expense", "趣味", "趣味", 2500),
+    ("2026-04-30", "expense", "自分磨き", "自分磨き", 34920),
+    ("2026-04-30", "expense", "その他", "その他", 16483),
 
-        ("2026-05-31", "expense", "食費", "食費", 27075),
-        ("2026-05-31", "expense", "日用品", "日用品", 15019),
-        ("2026-05-31", "expense", "交通費", "交通費", 3100),
-        ("2026-05-31", "expense", "交際費", "交際費", 3168),
-        ("2026-05-31", "expense", "趣味", "趣味", 41748),
-        ("2026-05-31", "expense", "自分磨き", "自分磨き", 24902),
-        ("2026-05-31", "expense", "その他", "その他", 14580),
+    ("2026-05-31", "expense", "食費", "食費", 27075),
+    ("2026-05-31", "expense", "日用品", "日用品", 15019),
+    ("2026-05-31", "expense", "交通費", "交通費", 3100),
+    ("2026-05-31", "expense", "交際費", "交際費", 3168),
+    ("2026-05-31", "expense", "趣味", "趣味", 41748),
+    ("2026-05-31", "expense", "自分磨き", "自分磨き", 24902),
+    ("2026-05-31", "expense", "その他", "その他", 14580),
 
-        ("2026-06-30", "expense", "食費", "食費", 27098),
-        ("2026-06-30", "expense", "日用品", "日用品", 19159),
-        ("2026-06-30", "expense", "交際費", "交際費", 34590),
-        ("2026-06-30", "expense", "趣味", "趣味", 3030),
-        ("2026-06-30", "expense", "自分磨き", "自分磨き", 79780),
-        ("2026-06-30", "expense", "ガソリン", "ガソリン", 3500),
-        ("2026-06-30", "expense", "その他", "その他", 2970),
+    ("2026-06-30", "expense", "食費", "食費", 27098),
+    ("2026-06-30", "expense", "日用品", "日用品", 19159),
+    ("2026-06-30", "expense", "交際費", "交際費", 34590),
+    ("2026-06-30", "expense", "趣味", "趣味", 3030),
+    ("2026-06-30", "expense", "自分磨き", "自分磨き", 79780),
+    ("2026-06-30", "expense", "ガソリン", "ガソリン", 3500),
+    ("2026-06-30", "expense", "その他", "その他", 2970),
 
-        ("2026-07-31", "expense", "食費", "食費", 33401),
-        ("2026-07-31", "expense", "日用品", "日用品", 12000),
-        ("2026-07-31", "expense", "交際費", "交際費", 7925),
-        ("2026-07-31", "expense", "趣味", "趣味 (Amazon含む)", 14391),
-        ("2026-07-31", "expense", "自分磨き", "自分磨き", 34078),
-        ("2026-07-31", "expense", "ガソリン", "ガソリン", 4800),
+    ("2026-07-31", "expense", "食費", "食費", 33401),
+    ("2026-07-31", "expense", "日用品", "日用品", 12000),
+    ("2026-07-31", "expense", "交際費", "交際費", 7925),
+    ("2026-07-31", "expense", "趣味", "趣味 (Amazon含む)", 14391),
+    ("2026-07-31", "expense", "自分磨き", "自分磨き", 34078),
+    ("2026-07-31", "expense", "ガソリン", "ガソリン", 4800),
 
-        ("2026-08-31", "expense", "食費", "食費", 22352),
-        ("2026-08-31", "expense", "日用品", "日用品", 13028),
-        ("2026-08-31", "expense", "交際費", "交際費", 3276),
-        ("2026-08-31", "expense", "趣味", "趣味", 69119),
-        ("2026-08-31", "expense", "ガソリン", "ガソリン", 4033),
-        ("2026-08-31", "expense", "その他", "その他", 160),
+    ("2026-08-31", "expense", "食費", "食費", 22352),
+    ("2026-08-31", "expense", "日用品", "日用品", 13028),
+    ("2026-08-31", "expense", "交際費", "交際費", 3276),
+    ("2026-08-31", "expense", "趣味", "趣味", 69119),
+    ("2026-08-31", "expense", "ガソリン", "ガソリン", 4033),
+    ("2026-08-31", "expense", "その他", "その他", 160),
 
-        # --- 過去 収入データ ---
-        ("2025-07-31", "income", "給料", "給料まとめ", 102419),
-        ("2025-08-31", "income", "給料", "給料まとめ", 236937),
-        ("2026-01-31", "income", "給料", "給料まとめ", 52313),
-        ("2026-02-28", "income", "給料", "給料まとめ", 94947),
-        ("2026-03-31", "income", "給料", "給料まとめ", 119087),
-        ("2026-04-30", "income", "給料", "給料まとめ", 60557),
-        ("2026-05-31", "income", "給料", "給料まとめ", 147402),
-        ("2026-06-30", "income", "給料", "給料まとめ", 170708),
-        ("2026-07-31", "income", "給料", "給料まとめ", 78204),
-        ("2026-08-31", "income", "給料", "給料まとめ", 117308),
-    ]
+    # --- 過去 収入データ ---
+    ("2025-07-31", "income", "給料", "給料まとめ", 102419),
+    ("2025-08-31", "income", "給料", "給料まとめ", 236937),
+    ("2026-01-31", "income", "給料", "給料まとめ", 52313),
+    ("2026-02-28", "income", "給料", "給料まとめ", 94947),
+    ("2026-03-31", "income", "給料", "給料まとめ", 119087),
+    ("2026-04-30", "income", "給料", "給料まとめ", 60557),
+    ("2026-05-31", "income", "給料", "給料まとめ", 147402),
+    ("2026-06-30", "income", "給料", "給料まとめ", 170708),
+    ("2026-07-31", "income", "給料", "給料まとめ", 78204),
+    ("2026-08-31", "income", "給料", "給料まとめ", 117308),
+]
 
+@app.get("/sync-past")
+def sync_past_data_endpoint():
     try:
         db.query(
             "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
             (USER_ID,)
         )
-        for rec_date, r_type, cat, title, amt in past_records:
+        for rec_date, r_type, cat, title, amt in PAST_RECORDS_DATA:
             db.insert_money_record(
                 record_date=rec_date,
                 record_type=r_type,
@@ -179,13 +177,9 @@ def sync_past_app_data():
                 detail="過去アプリより引き継ぎ",
                 user_id=USER_ID
             )
+        return RedirectResponse(url="/?_t=" + str(int(time.time())))
     except Exception as e:
-        print(f"Past sync error: {e}")
-
-try:
-    sync_past_app_data()
-except Exception as e:
-    print(f"Past data sync call error: {e}")
+        return HTMLResponse(f"<h3>同期エラー: {e}</h3>")
 
 def get_calendar_service():
     if not os.path.exists(CREDENTIALS_PATH):
@@ -492,7 +486,7 @@ def dashboard(month: str | None = None):
                 all_time_expense = tot
         all_time_balance = all_time_income - all_time_expense
 
-        # 3. 2026年の年間累計収入（プレースホルダ経由で安全に検索）
+        # 3. 2026年の年間累計収入（扶養チェック用）
         income_2026_rows = db.query(
             """
             SELECT COALESCE(SUM(amount), 0) as total
@@ -549,18 +543,20 @@ def dashboard(month: str | None = None):
             (USER_ID, f"{target_month}%")
         )
 
-        CAT_COLORS = {
-            "食費": "#68d391",
-            "外食費": "#f6ad55",
-            "日用品": "#63b3ed",
-            "趣味": "#e53e3e",
-            "自分磨き": "#3182ce",
-            "交際費": "#d69e2e",
-            "交通費": "#ed64a6",
-            "ガソリン": "#38a169",
-            "衣服": "#4c51bf",
-            "その他": "#a0aec0",
+        CAT_PALETTE = {
+            "食費": "#10b981",       # 鮮やかなグリーン
+            "外食費": "#f59e0b",     # 鮮やかなオレンジ
+            "日用品": "#06b6d4",     # 爽快なシアンブルー
+            "趣味": "#ef4444",       # レッド
+            "趣味・娯楽": "#ef4444",  # レッド
+            "自分磨き": "#3b82f6",   # ブルー
+            "交際費": "#eab308",     # イエロー
+            "交通費": "#ec4899",     # ピンク
+            "ガソリン": "#14b8a6",   # ターコイズ
+            "衣服": "#8b5cf6",       # パープル
+            "その他": "#84cc16",     # ライムグリーン
         }
+        FALLBACK_COLORS = ["#f97316", "#06b6d4", "#a855f7", "#ec4899", "#14b8a6", "#3b82f6"]
 
         cat_labels = []
         cat_data = []
@@ -568,12 +564,12 @@ def dashboard(month: str | None = None):
         total_exp_month = (summary.get("expenses") if isinstance(summary, dict) else 0) or 1
 
         category_list_html = ""
-        for r in (category_rows or []):
+        for i, r in enumerate(category_rows or []):
             c_name = str((r.get("category") if isinstance(r, dict) else r[0]) or "その他")
             c_amt = int((r.get("cat_total") if isinstance(r, dict) else r[1]) or 0)
             cat_labels.append(c_name)
             cat_data.append(c_amt)
-            color = CAT_COLORS.get(c_name, "#a0aec0")
+            color = CAT_PALETTE.get(c_name, FALLBACK_COLORS[i % len(FALLBACK_COLORS)])
             cat_colors.append(color)
 
             pct = round((c_amt / total_exp_month) * 100, 1)
@@ -595,7 +591,7 @@ def dashboard(month: str | None = None):
             category_card_html = f"""
             <div class="chart-card">
                 <div class="chart-title">🍩 {month_str}月 支出割合・内訳</div>
-                <div style="max-width: 260px; margin: 0 auto 12px auto;">
+                <div style="max-width: 250px; margin: 0 auto 12px auto;">
                     <canvas id="categoryChart" height="240"></canvas>
                 </div>
                 <div class="category-list">
@@ -643,8 +639,8 @@ def dashboard(month: str | None = None):
                 """
 
         today_str = datetime.now().strftime("%Y-%m-%d")
-        bal_color = "#63b3ed" if all_time_balance >= 0 else "#fc8181"
-        rem_color = "#e53e3e" if rem_103 < 0 else "#2b6cb0"
+        bal_color = "#38bdf8" if all_time_balance >= 0 else "#f87171"
+        rem_color = "#ef4444" if rem_103 < 0 else "#2563eb"
 
         html_content = f"""
         <!DOCTYPE html>
@@ -656,34 +652,35 @@ def dashboard(month: str | None = None):
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <style>
                 * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-                body {{ background-color: #f7f9fa; color: #2d3748; padding-bottom: 70px; }}
+                body {{ background-color: #f1f5f9; color: #1e293b; padding-bottom: 70px; }}
                 
                 .header {{ 
-                    background: #1a202c; 
+                    background: #0f172a; 
                     color: white; 
-                    padding: 14px 20px; 
+                    padding: 14px 18px; 
                     display: flex; 
                     justify-content: space-between; 
                     align-items: center; 
                     position: sticky; 
                     top: 0; 
                     z-index: 100; 
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.12); 
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.15); 
                 }}
-                .header h1 {{ font-size: 1.05rem; font-weight: 700; }}
-                .header-actions {{ display: flex; gap: 8px; }}
+                .header h1 {{ font-size: 1rem; font-weight: 700; }}
+                .header-actions {{ display: flex; gap: 6px; }}
                 .btn-action {{
                     border: none;
-                    padding: 7px 12px;
+                    padding: 7px 11px;
                     border-radius: 8px;
-                    font-size: 0.8rem;
+                    font-size: 0.78rem;
                     font-weight: 700;
                     cursor: pointer;
                     transition: transform 0.1s;
                 }}
                 .btn-action:active {{ transform: scale(0.95); }}
-                .btn-reload {{ background: #2d3748; color: #edf2f7; }}
-                .btn-add {{ background: #3182ce; color: white; }}
+                .btn-sync {{ background: #059669; color: white; }}
+                .btn-reload {{ background: #334155; color: #e2e8f0; }}
+                .btn-add {{ background: #2563eb; color: white; }}
 
                 .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
 
@@ -693,78 +690,79 @@ def dashboard(month: str | None = None):
                     padding: 16px;
                     margin-bottom: 14px;
                     box-shadow: 0 2px 6px rgba(0,0,0,0.04);
-                    border-left: 4px solid #3182ce;
+                    border-left: 5px solid #2563eb;
                 }}
-                .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #2d3748; display: flex; justify-content: space-between; }}
-                .fuyou-meter-bg {{ background: #edf2f7; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
-                .fuyou-meter-bar {{ background: linear-gradient(90deg, #38a169, #dd6b20); height: 100%; border-radius: 5px; }}
-                .fuyou-desc {{ font-size: 0.78rem; color: #718096; display: flex; justify-content: space-between; }}
+                .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #1e293b; display: flex; justify-content: space-between; }}
+                .fuyou-meter-bg {{ background: #e2e8f0; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
+                .fuyou-meter-bar {{ background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444); height: 100%; border-radius: 5px; }}
+                .fuyou-desc {{ font-size: 0.78rem; color: #64748b; display: flex; justify-content: space-between; }}
 
-                .all-time-card {{ background: linear-gradient(135deg, #2d3748, #1a202c); color: white; border-radius: 16px; padding: 16px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
-                .all-time-title {{ font-size: 0.75rem; color: #a0aec0; letter-spacing: 0.5px; margin-bottom: 4px; }}
-                .all-time-balance {{ font-size: 2rem; font-weight: 800; color: {bal_color}; }}
-                .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.82rem; }}
-                .all-time-grid span {{ color: #a0aec0; display: block; font-size: 0.72rem; }}
+                .all-time-card {{ background: linear-gradient(135deg, #1e293b, #0f172a); color: white; border-radius: 16px; padding: 18px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+                .all-time-title {{ font-size: 0.75rem; color: #94a3b8; letter-spacing: 0.5px; margin-bottom: 4px; }}
+                .all-time-balance {{ font-size: 2.1rem; font-weight: 800; color: {bal_color}; }}
+                .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.12); font-size: 0.82rem; }}
+                .all-time-grid span {{ color: #94a3b8; display: block; font-size: 0.72rem; }}
 
-                .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }}
-                .month-nav a {{ text-decoration: none; color: #3182ce; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #ebf8ff; }}
-                .current-month {{ font-size: 1.15rem; font-weight: 800; color: #1a202c; }}
+                .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.03); }}
+                .month-nav a {{ text-decoration: none; color: #2563eb; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #eff6ff; }}
+                .current-month {{ font-size: 1.15rem; font-weight: 800; color: #0f172a; }}
 
                 .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
                 .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
-                .summary-main-label {{ font-size: 0.78rem; color: #718096; margin-bottom: 2px; }}
-                .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #38a169; }}
+                .summary-main-label {{ font-size: 0.78rem; color: #64748b; margin-bottom: 2px; }}
+                .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #10b981; }}
                 .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
-                .summary-sub-label {{ font-size: 0.75rem; color: #718096; }}
+                .summary-sub-label {{ font-size: 0.75rem; color: #64748b; }}
                 .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 2px; }}
-                .val-expense {{ color: #e53e3e; }}
-                .val-balance {{ color: #3182ce; }}
+                .val-expense {{ color: #ef4444; }}
+                .val-balance {{ color: #0284c7; }}
 
                 .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
-                .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #2d3748; margin-bottom: 12px; }}
+                .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #1e293b; margin-bottom: 12px; }}
 
-                .category-list {{ margin-top: 14px; border-top: 1px solid #edf2f7; padding-top: 10px; }}
-                .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f7fafc; }}
+                .category-list {{ margin-top: 14px; border-top: 1px solid #f1f5f9; padding-top: 10px; }}
+                .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f8fafc; }}
                 .cat-row:last-child {{ border-bottom: none; }}
                 .cat-row-left {{ display: flex; align-items: center; gap: 8px; }}
-                .cat-color-dot {{ width: 11px; height: 11px; border-radius: 50%; display: inline-block; }}
-                .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #2d3748; }}
+                .cat-color-dot {{ width: 12px; height: 12px; border-radius: 50%; display: inline-block; }}
+                .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #1e293b; }}
                 .cat-row-right {{ display: flex; align-items: center; gap: 12px; }}
-                .cat-row-pct {{ font-size: 0.8rem; color: #718096; min-width: 42px; text-align: right; }}
-                .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; min-width: 75px; text-align: right; }}
+                .cat-row-pct {{ font-size: 0.8rem; color: #64748b; min-width: 42px; text-align: right; }}
+                .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #0f172a; min-width: 75px; text-align: right; }}
 
-                .section-title {{ font-size: 0.92rem; font-weight: 700; color: #4a5568; margin: 18px 0 10px 4px; }}
-                .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }}
+                .section-title {{ font-size: 0.92rem; font-weight: 700; color: #475569; margin: 18px 0 10px 4px; }}
+                .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }}
                 .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
-                .record-title {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; margin-left: 2px; }}
-                .record-date {{ font-size: 0.7rem; color: #a0aec0; }}
-                .record-detail {{ font-size: 0.72rem; color: #718096; }}
+                .record-title {{ font-size: 0.92rem; font-weight: 700; color: #0f172a; margin-left: 2px; }}
+                .record-date {{ font-size: 0.7rem; color: #94a3b8; }}
+                .record-detail {{ font-size: 0.72rem; color: #64748b; }}
                 .badge {{ font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
-                .badge-income {{ background: #c6f6d5; color: #22543d; }}
-                .badge-expense {{ background: #fed7d7; color: #742a2a; }}
+                .badge-income {{ background: #ecfdf5; color: #059669; }}
+                .badge-expense {{ background: #fef2f2; color: #dc2626; }}
                 .record-right {{ display: flex; align-items: center; gap: 10px; }}
                 .record-amount {{ font-size: 1rem; font-weight: 800; white-space: nowrap; }}
-                .amount-income {{ color: #38a169; }}
-                .amount-expense {{ color: #e53e3e; }}
-                .delete-btn {{ background: none; border: none; color: #cbd5e0; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
-                .delete-btn:hover {{ color: #e53e3e; }}
-                .empty-state {{ text-align: center; padding: 24px; color: #a0aec0; font-size: 0.85rem; background: white; border-radius: 12px; }}
+                .amount-income {{ color: #059669; }}
+                .amount-expense {{ color: #dc2626; }}
+                .delete-btn {{ background: none; border: none; color: #cbd5e1; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
+                .delete-btn:hover {{ color: #dc2626; }}
+                .empty-state {{ text-align: center; padding: 24px; color: #94a3b8; font-size: 0.85rem; background: white; border-radius: 12px; }}
 
                 .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
                 .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
-                .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #1a202c; display: flex; justify-content: space-between; }}
+                .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #0f172a; display: flex; justify-content: space-between; }}
                 .form-group {{ margin-bottom: 12px; }}
-                .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #718096; margin-bottom: 4px; }}
-                .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
+                .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
+                .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
                 .form-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-                .btn-submit {{ width: 100%; background: #3182ce; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
-                .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #a0aec0; }}
+                .btn-submit {{ width: 100%; background: #2563eb; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
+                .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #94a3b8; }}
             </style>
         </head>
         <body>
             <div class="header">
                 <h1>家計簿 & シフト管理</h1>
                 <div class="header-actions">
+                    <button class="btn-action btn-sync" onclick="location.href='/sync-past'">📥 過去データ同期</button>
                     <button class="btn-action btn-add" onclick="openModal()">➕ 手入力</button>
                     <button class="btn-action btn-reload" onclick="forceReload()">🔄</button>
                 </div>
@@ -795,7 +793,7 @@ def dashboard(month: str | None = None):
                         </div>
                         <div>
                             <span>通算総支出</span>
-                            <strong style="color: #feb2b2;">-¥{all_time_expense:,}</strong>
+                            <strong style="color: #fca5a5;">-¥{all_time_expense:,}</strong>
                         </div>
                     </div>
                 </div>
@@ -975,13 +973,13 @@ def dashboard(month: str | None = None):
                             {{
                                 label: '収入',
                                 data: {json.dumps(trend_incomes)},
-                                backgroundColor: '#38a169',
+                                backgroundColor: '#10b981',
                                 borderRadius: 4
                             }},
                             {{
                                 label: '支出',
                                 data: {json.dumps(trend_expenses)},
-                                backgroundColor: '#e53e3e',
+                                backgroundColor: '#ef4444',
                                 borderRadius: 4
                             }}
                         ]
