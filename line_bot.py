@@ -30,13 +30,11 @@ USER_ID = os.environ.get("APP_USER_ID", "default").strip("[] \t\r\n'\"")
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "").strip("[] \t\r\n'\"")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip("[] \t\r\n'\"")
 
-# 起動時にデータベーステーブルの存在確認・作成
 try:
     db.init_db()
 except Exception as e:
     print(f"DB Init Error: {e}")
 
-# バイト先ごとの時給設定
 WAGE_SETTINGS = {
     "すき家": {"day": 1150, "night": 1438},
     "default": {"day": 1150, "night": 1438},
@@ -172,15 +170,17 @@ def get_best_gemini_model() -> str:
                 if "generateContent" in m.get("supportedGenerationMethods", [])
             ]
             preferred = [
-                "models/gemini-2.5-flash",
+                "models/gemini-3.8-flash",
+                "models/gemini-3.0-flash",
+                "models/gemini-3-flash",
                 "models/gemini-2.0-flash",
-                "models/gemini-2.0-flash-exp",
-                "models/gemini-1.5-flash-latest",
-                "models/gemini-1.5-flash",
             ]
             for p in preferred:
                 if p in available:
                     return p
+            for a in available:
+                if "3." in a and "flash" in a.lower():
+                    return a
             for a in available:
                 if "flash" in a.lower():
                     return a
@@ -189,12 +189,12 @@ def get_best_gemini_model() -> str:
     except Exception as e:
         print(f"ListModels Warning: {e}")
 
-    return "models/gemini-2.0-flash"
+    return "models/gemini-3.8-flash"
 
 # -------------------------------------------------------------
-# レシート画像解析 (複数枚一括対応)
+# 支出画像解析（PayPay支出厳格判定＆除外機能付き）
 # -------------------------------------------------------------
-def analyze_receipt_image(image_bytes: bytes) -> list[dict]:
+def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
@@ -206,16 +206,23 @@ def analyze_receipt_image(image_bytes: bytes) -> list[dict]:
     now_str = datetime.now().strftime("%Y-%m-%d")
 
     prompt = (
-        f"この画像に写っているすべてのレシート（領収書）を読み取り、以下のJSON配列形式のみで出力してください。\n"
-        f"画像内に複数のレシートがある場合は、それぞれを1つの要素として配列に含めてください。\n"
+        f"この画像（レシート写真、銀行口座、クレジットカード、またはPayPayなどの決済アプリの取引履歴スクショ）から、"
+        f"実際に支払いが完了した【支出】のみをすべて抽出してください。\n\n"
+        f"【絶対に除外する項目】\n"
+        f"・「支払い失敗」や未完了の取引（グレー表示や取り消し線など）\n"
+        f"・「チャージ」「ATMからのチャージ」\n"
+        f"・「受け取る」「受け取り完了」「送金受取」\n"
+        f"・「PayPayポイント」「付与処理中」「ポイント付与」\n"
+        f"・口座残高やポイント残高の数字\n\n"
+        f"上記を除外し、実際に買い物や決済が完了した支出のみを以下のJSON配列形式で出力してください。\n"
         f"マークダウンの```json等は含めず、純粋なJSON文字列（配列）のみを出力してください。\n"
         f"[\n"
         f"  {{\n"
-        f'    "date": "YYYY-MM-DD形式。レシートに年がない場合は現在の年を補完。不明なら「{now_str}」",\n'
-        f'    "store": "店名（例: ユニオン、セブンイレブンなど）",\n'
-        f'    "amount": 合計金額（支払った税込総額、数値の整数のみ）,\n'
+        f'    "date": "YYYY-MM-DD形式（例: 2026-09-27）。年がない場合は2026年を補完。不明なら「{now_str}」",\n'
+        f'    "store": "店名やサービス名（例: ミスタードーナツ、すき家、ダイソー、Amazonなど）",\n'
+        f'    "amount": 金額（マイナスや円、カンマは除いた正の整数。例: 1065）,\n'
         f'    "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
-        f'    "detail": "購入した主な品目（カンマ区切りで簡潔に）"\n'
+        f'    "detail": "店舗支店名や品目があれば簡潔に（例: サンエー西原ショップ）"\n'
         f"  }}\n"
         f"]"
     )
@@ -471,9 +478,6 @@ def handle_text_message(event):
             )
         )
 
-# -------------------------------------------------------------
-# 画像メッセージ処理（レシート複数枚・一括認識対応）
-# -------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     try:
@@ -485,23 +489,37 @@ def handle_image_message(event):
         return
 
     try:
-        receipts = analyze_receipt_image(image_bytes)
+        items = analyze_expense_image(image_bytes)
     except Exception as e:
-        _send_reply(event.reply_token, f"レシートの読み取りでエラーが出たで💦\n{e}")
+        _send_reply(event.reply_token, f"明細の読み取りでエラーが出たで💦\n{e}")
         return
 
     saved_items = []
+    skipped_count = 0
     total_amount = 0
 
-    for item in receipts:
+    for item in items:
         try:
             rec_date = str(item.get("date") or datetime.now().strftime("%Y-%m-%d")).strip()
-            store = str(item.get("store") or "不明な店舗").strip()
+            store = str(item.get("store") or "不明な支出").strip()
             amount = int(item.get("amount") or 0)
             category = str(item.get("category") or "その他").strip()
             detail = str(item.get("detail") or "").strip()
 
             if amount > 0:
+                # 重複登録防止チェック（同じ日・同じ店・同じ金額が既にあればスキップ）
+                existing = db.query(
+                    """
+                    SELECT id FROM public.money_records 
+                    WHERE user_id = %s AND record_date = %s AND title = %s AND amount = %s AND record_type = 'expense'
+                    LIMIT 1
+                    """,
+                    (USER_ID, rec_date, store, amount)
+                )
+                if existing:
+                    skipped_count += 1
+                    continue
+
                 db.insert_money_record(
                     record_date=rec_date,
                     record_type="expense",
@@ -512,21 +530,25 @@ def handle_image_message(event):
                     detail=detail,
                     user_id=USER_ID
                 )
-                saved_items.append(f"・{store} ({rec_date})\n  ¥{amount:,}（{category}） {detail}")
+                saved_items.append(f"・{store} ({rec_date})\n  ¥{amount:,}（{category}） {detail}".strip())
                 total_amount += amount
         except Exception as e:
             print(f"Item save error: {e}")
 
     if saved_items:
-        reply_lines = [f"🧾 レシート {len(saved_items)}件 を一括記録したで！", ""]
+        reply_lines = [f"💳 支出明細 {len(saved_items)}件 を一括記録したで！", ""]
         reply_lines.extend(saved_items)
         if len(saved_items) > 1:
             reply_lines.append("")
-            reply_lines.append(f"【支出合計】 ¥{total_amount:,}")
+            reply_lines.append(f"【今回の支出合計】 ¥{total_amount:,}")
+        if skipped_count > 0:
+            reply_lines.append(f"\n（※重複していた {skipped_count}件 は自動スキップ済）")
         reply_lines.append("\n家計簿ダッシュボードに即時反映されたで！")
         reply_text = "\n".join(reply_lines)
+    elif skipped_count > 0:
+        reply_text = f"写っていた支出（{skipped_count}件）は既に登録済みやったで！重複登録は防いでおいたよ👍"
     else:
-        reply_text = "レシートの金額を読み取れんかった💦 もう一度はっきり写して送ってみて！"
+        reply_text = "支払い完了の支出が見つからんかったで💦（チャージやポイント付与、失敗した取引は自動除外してるよ）"
 
     _send_reply(event.reply_token, reply_text)
 
