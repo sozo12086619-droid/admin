@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import base64
 import urllib.request
 import urllib.error
@@ -153,15 +154,16 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
-# 最新の利用可能Geminiモデルを自動検出
+# 候補モデル一覧を取得（混雑時の予備モデルも含む）
 # -------------------------------------------------------------
-def get_best_gemini_model() -> str:
+def get_candidate_models() -> list[str]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}".strip("[] \t\r\n'\"")
+    models = ["models/gemini-3.8-flash", "models/gemini-2.0-flash", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
     try:
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}".strip("[] \t\r\n'\"")
         req = urllib.request.Request(list_url, method="GET")
         with urllib.request.urlopen(req, timeout=10) as res:
             res_data = json.loads(res.read().decode("utf-8"))
@@ -169,39 +171,30 @@ def get_best_gemini_model() -> str:
                 m["name"] for m in res_data.get("models", [])
                 if "generateContent" in m.get("supportedGenerationMethods", [])
             ]
-            preferred = [
-                "models/gemini-3.8-flash",
-                "models/gemini-3.0-flash",
-                "models/gemini-3-flash",
-                "models/gemini-2.0-flash",
-            ]
-            for p in preferred:
-                if p in available:
-                    return p
+            ordered = []
+            for p in ["gemini-3.8-flash", "gemini-3-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+                for a in available:
+                    if p in a and a not in ordered:
+                        ordered.append(a)
             for a in available:
-                if "3." in a and "flash" in a.lower():
-                    return a
-            for a in available:
-                if "flash" in a.lower():
-                    return a
-            if available:
-                return available[0]
+                if "flash" in a.lower() and a not in ordered:
+                    ordered.append(a)
+            if ordered:
+                return ordered
     except Exception as e:
         print(f"ListModels Warning: {e}")
 
-    return "models/gemini-3.8-flash"
+    return models
 
 # -------------------------------------------------------------
-# 支出画像解析（PayPay支出厳格判定＆除外機能付き）
+# 支出画像解析（混雑時自動フォールバック付き）
 # -------------------------------------------------------------
 def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    model_name = get_best_gemini_model()
-    target_url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
-    
+    models = get_candidate_models()
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     now_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -244,28 +237,41 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
         }
     }
 
-    req = urllib.request.Request(
-        target_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
+    last_error = None
+    for model_name in models:
+        target_url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
+        req = urllib.request.Request(
+            target_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                res_data = json.loads(res.read().decode("utf-8"))
+                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+                clean_text = re.sub(r"\s*```$", "", clean_text.strip())
+                parsed = json.loads(clean_text)
+                if isinstance(parsed, dict):
+                    return [parsed]
+                elif isinstance(parsed, list):
+                    return parsed
+                return []
+        except urllib.error.HTTPError as he:
+            err_msg = he.read().decode("utf-8", errors="ignore")
+            last_error = f"HTTP {he.code}: {err_msg}"
+            # 503（混雑）または 404（不在）の場合は次の候補モデルへ即座にフォールバック
+            if he.code in [503, 404, 429]:
+                print(f"Model {model_name} busy ({he.code}), falling back to next model...")
+                time.sleep(1)
+                continue
+            raise Exception(last_error)
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as res:
-            res_data = json.loads(res.read().decode("utf-8"))
-            text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-            clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-            clean_text = re.sub(r"\s*```$", "", clean_text.strip())
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, dict):
-                return [parsed]
-            elif isinstance(parsed, list):
-                return parsed
-            return []
-    except urllib.error.HTTPError as he:
-        err_msg = he.read().decode("utf-8", errors="ignore")
-        raise Exception(f"HTTP {he.code}: {err_msg}")
+    raise Exception(last_error or "すべてのAIモデルが混雑中です。少し待ってから再度送信してください。")
 
 # -------------------------------------------------------------
 # 家計簿ダッシュボード（Web画面）
@@ -507,7 +513,6 @@ def handle_image_message(event):
             detail = str(item.get("detail") or "").strip()
 
             if amount > 0:
-                # 重複登録防止チェック（同じ日・同じ店・同じ金額が既にあればスキップ）
                 existing = db.query(
                     """
                     SELECT id FROM public.money_records 
