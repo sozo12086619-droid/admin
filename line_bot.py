@@ -154,14 +154,13 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
-# 支出画像解析（混雑時自動リトライ付き）
+# 支出画像解析（レートリミット対策済み）
 # -------------------------------------------------------------
 def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
     if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    # 最新の正規モデル
     model_name = "models/gemini-3.8-flash"
     target_url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
 
@@ -214,35 +213,26 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
         method="POST"
     )
 
-    # 混雑（503等）が発生した場合は自動で2〜3回再試行する
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as res:
-                res_data = json.loads(res.read().decode("utf-8"))
-                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-                clean_text = re.sub(r"\s*```$", "", clean_text.strip())
-                parsed = json.loads(clean_text)
-                if isinstance(parsed, dict):
-                    return [parsed]
-                elif isinstance(parsed, list):
-                    return parsed
-                return []
-        except urllib.error.HTTPError as he:
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            res_data = json.loads(res.read().decode("utf-8"))
+            text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+            clean_text = re.sub(r"\s*```$", "", clean_text.strip())
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, dict):
+                return [parsed]
+            elif isinstance(parsed, list):
+                return parsed
+            return []
+    except urllib.error.HTTPError as he:
+        if he.code == 429:
+            raise Exception("⚠️ Google AIの利用制限（1分間に5回まで）に達しました💦 1分ほど待ってからもう一度送信してください！")
+        elif he.code == 503:
+            raise Exception("⚠️ Google AIサーバーが一時的に混雑しています💦 30秒ほど待ってからもう一度送信してください！")
+        else:
             err_msg = he.read().decode("utf-8", errors="ignore")
-            # 混雑時（503や429）は数秒待機してリトライ
-            if he.code in [503, 429] and attempt < max_retries - 1:
-                time.sleep(attempt + 2)
-                continue
             raise Exception(f"HTTP {he.code}: {err_msg}")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(attempt + 2)
-                continue
-            raise e
-
-    raise Exception("Google AIサーバーが現在混雑しています。1分ほど置いてから再度お試しください。")
 
 # -------------------------------------------------------------
 # 家計簿ダッシュボード（Web画面）
@@ -468,7 +458,7 @@ def handle_image_message(event):
     try:
         items = analyze_expense_image(image_bytes)
     except Exception as e:
-        _send_reply(event.reply_token, f"明細の読み取りでエラーが出たで💦\n{e}")
+        _send_reply(event.reply_token, str(e))
         return
 
     saved_items = []
