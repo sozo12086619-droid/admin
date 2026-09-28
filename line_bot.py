@@ -3,6 +3,7 @@ import re
 import json
 import base64
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -23,11 +24,11 @@ import db
 
 app = FastAPI()
 
-CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-USER_ID = os.environ.get("APP_USER_ID", "default")
-CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
+CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+USER_ID = os.environ.get("APP_USER_ID", "default").strip()
+CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 # 起動時にデータベーステーブルの存在確認・作成
 try:
@@ -53,7 +54,7 @@ def get_calendar_service():
         return None
     creds = service_account.Credentials.from_service_account_file(
         CREDENTIALS_PATH,
-        scopes=["https://www.googleapis.com/auth/calendar"]
+        scopes=["[https://www.googleapis.com/auth/calendar](https://www.googleapis.com/auth/calendar)"]
     )
     return build("calendar", "v3", credentials=creds)
 
@@ -154,13 +155,54 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
+# 最新の利用可能Geminiモデルを自動検出
+# -------------------------------------------------------------
+def get_best_gemini_model() -> str:
+    if not GEMINI_API_KEY:
+        raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
+
+    list_url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){GEMINI_API_KEY}"
+    try:
+        req = urllib.request.Request(list_url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as res:
+            res_data = json.loads(res.read().decode("utf-8"))
+            available = [
+                m["name"] for m in res_data.get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            
+            preferred = [
+                "models/gemini-2.5-flash",
+                "models/gemini-2.0-flash",
+                "models/gemini-2.0-flash-exp",
+                "models/gemini-1.5-flash-latest",
+                "models/gemini-1.5-flash",
+                "models/gemini-1.5-pro",
+            ]
+            for p in preferred:
+                if p in available:
+                    return p
+            
+            for a in available:
+                if "flash" in a.lower():
+                    return a
+            
+            if available:
+                return available[0]
+    except Exception as e:
+        print(f"ListModels auto-detect warning: {e}")
+
+    return "models/gemini-2.0-flash"
+
+# -------------------------------------------------------------
 # レシート画像解析 (Gemini API)
 # -------------------------------------------------------------
 def analyze_receipt_image(image_bytes: bytes) -> dict:
     if not GEMINI_API_KEY:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    model_name = get_best_gemini_model()
+    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={GEMINI_API_KEY}"
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     now_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -200,10 +242,16 @@ def analyze_receipt_image(image_bytes: bytes) -> dict:
         method="POST"
     )
 
-    with urllib.request.urlopen(req, timeout=30) as res:
-        res_data = json.loads(res.read().decode("utf-8"))
-        text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text.strip())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            res_data = json.loads(res.read().decode("utf-8"))
+            text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+            clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+            clean_text = re.sub(r"\s*```$", "", clean_text.strip())
+            return json.loads(clean_text)
+    except urllib.error.HTTPError as he:
+        err_msg = he.read().decode("utf-8", errors="ignore")
+        raise Exception(f"HTTP {he.code}: {err_msg}")
 
 # -------------------------------------------------------------
 # 家計簿ダッシュボード（Web画面）
@@ -344,9 +392,6 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return "OK"
 
-# -------------------------------------------------------------
-# テキストメッセージ処理（シフト登録・メモ保存）
-# -------------------------------------------------------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     text = event.message.text.strip()
@@ -419,12 +464,8 @@ def handle_text_message(event):
             )
         )
 
-# -------------------------------------------------------------
-# 画像メッセージ処理（レシート読み取り ➔ 家計簿支出登録）
-# -------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
-    # 1. LINEサーバーから画像バイナリを取得
     try:
         with ApiClient(configuration) as api_client:
             blob_client = MessagingApiBlob(api_client)
@@ -434,7 +475,6 @@ def handle_image_message(event):
         _send_reply(event.reply_token, reply_text)
         return
 
-    # 2. Gemini API でレシート画像を解析
     try:
         data = analyze_receipt_image(image_bytes)
     except Exception as e:
@@ -442,7 +482,6 @@ def handle_image_message(event):
         _send_reply(event.reply_token, reply_text)
         return
 
-    # 3. Supabase（家計簿テーブル）に支出として保存
     try:
         rec_date = data.get("date") or datetime.now().strftime("%Y-%m-%d")
         store = data.get("store") or "不明な店舗"
