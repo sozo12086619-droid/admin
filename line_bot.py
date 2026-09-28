@@ -154,7 +154,64 @@ def add_event_to_calendar(parsed):
     return service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
 # -------------------------------------------------------------
-# 支出画像解析（レートリミット対策済み）
+# 店名からカテゴリを推測
+# -------------------------------------------------------------
+def guess_category(title: str) -> str:
+    t = title.lower()
+    if any(k in t for k in ["すき家", "サンエー", "セブン", "ファミリーマート", "ファミマ", "ローソン", "ミスタードーナツ", "ミスド", "マック", "スーパー", "食堂", "カフェ", "弁当"]):
+        return "食費"
+    elif any(k in t for k in ["ダイソー", "マツモトキヨシ", "マツキヨ", "薬", "ドラッグ", "日用品", "セリア"]):
+        return "日用品"
+    elif any(k in t for k in ["apple", "amazon", "カイカツ", "快活", "netflix", "spotify", "映画", "プライム"]):
+        return "趣味・娯楽"
+    elif any(k in t for k in ["電車", "バス", "タクシー", "ガソリン", "定期"]):
+        return "交通費"
+    return "その他"
+
+# -------------------------------------------------------------
+# テキストから支出行を解析
+# -------------------------------------------------------------
+def parse_expense_text(text: str):
+    # シフト形式（時間範囲）が含まれる行はスキップ
+    if re.search(r'\d{1,2}(?::\d{2})?\s*[-〜~～]\s*\d{1,2}', text):
+        return None
+
+    # 合計や件数まとめ行はスキップ
+    if re.search(r'^(?:合計|小計|PayPay|VISAデビット)\s*[\d,]+円?\s*(?:\(\d+件\))?$', text.strip()):
+        return None
+
+    # 日付 + 店名 + 金額（例: 9/1 Appleサービス 1,180円）
+    match = re.search(r'(?:(\d{4})[/-年])?\s*(\d{1,2})[/-月](\d{1,2})日?\s+(.+?)\s+([0-9,]+)\s*円?$', text.strip())
+    if not match:
+        return None
+
+    now = datetime.now()
+    year = int(match.group(1)) if match.group(1) else now.year
+    month = int(match.group(2))
+    day = int(match.group(3))
+    title = match.group(4).strip()
+    amount_str = match.group(5).replace(",", "").strip()
+
+    try:
+        amount = int(amount_str)
+    except ValueError:
+        return None
+
+    if amount <= 0:
+        return None
+
+    category = guess_category(title)
+    record_date = f"{year:04d}-{month:02d}-{day:02d}"
+
+    return {
+        "record_date": record_date,
+        "title": title,
+        "amount": amount,
+        "category": category
+    }
+
+# -------------------------------------------------------------
+# 支出画像解析（Gemini API）
 # -------------------------------------------------------------
 def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
@@ -168,23 +225,16 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
     now_str = datetime.now().strftime("%Y-%m-%d")
 
     prompt = (
-        f"この画像（レシート写真、銀行口座、クレジットカード、またはPayPayなどの決済アプリの取引履歴スクショ）から、"
-        f"実際に支払いが完了した【支出】のみをすべて抽出してください。\n\n"
-        f"【絶対に除外する項目】\n"
-        f"・「支払い失敗」や未完了の取引（グレー表示や取り消し線など）\n"
-        f"・「チャージ」「ATMからのチャージ」\n"
-        f"・「受け取る」「受け取り完了」「送金受取」\n"
-        f"・「PayPayポイント」「付与処理中」「ポイント付与」\n"
-        f"・口座残高やポイント残高の数字\n\n"
-        f"上記を除外し、実際に買い物や決済が完了した支出のみを以下のJSON配列形式で出力してください。\n"
-        f"マークダウンの```json等は含めず、純粋なJSON文字列（配列）のみを出力してください。\n"
+        f"この画像から実際に支払いが完了した【支出】のみをすべて抽出してください。\n"
+        f"「支払い失敗」「チャージ」「受取」「ポイント付与」「残高」は絶対に除外してください。\n"
+        f"以下のJSON配列形式のみで出力してください（マークダウン不要）。\n"
         f"[\n"
         f"  {{\n"
-        f'    "date": "YYYY-MM-DD形式（例: 2026-09-27）。年がない場合は2026年を補完。不明なら「{now_str}」",\n'
-        f'    "store": "店名やサービス名（例: ミスタードーナツ、すき家、ダイソー、Amazonなど）",\n'
-        f'    "amount": 金額（マイナスや円、カンマは除いた正の整数。例: 1065）,\n'
+        f'    "date": "YYYY-MM-DD形式。不明なら「{now_str}」",\n'
+        f'    "store": "店名や摘要",\n'
+        f'    "amount": 金額（正の整数）,\n'
         f'    "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
-        f'    "detail": "店舗支店名や品目があれば簡潔に（例: サンエー西原ショップ）"\n'
+        f'    "detail": "品目等"\n'
         f"  }}\n"
         f"]"
     )
@@ -193,17 +243,10 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
         "contents": [{
             "parts": [
                 {"text": prompt},
-                {
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": b64_img
-                    }
-                }
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
             ]
         }],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        "generationConfig": {"response_mime_type": "application/json"}
     }
 
     req = urllib.request.Request(
@@ -267,7 +310,6 @@ def dashboard(month: str | None = None):
             sign = "+" if is_income else "-"
             badge_class = "badge-income" if is_income else "badge-expense"
             badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else r["category"])
-            
             detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
             
             records_html += f"""
@@ -373,6 +415,9 @@ async def callback(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return "OK"
 
+# -------------------------------------------------------------
+# テキストメッセージ処理（シフト登録 ＆ 支出テキスト一括登録 ＆ メモ保存）
+# -------------------------------------------------------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     text = event.message.text.strip()
@@ -383,58 +428,113 @@ def handle_text_message(event):
     except Exception as e:
         print(f"DB Error: {e}")
 
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    
+    # 1. シフトの判定
     calendar_success = []
     calendar_error = None
     total_expected_salary = 0
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    # 2. 支出テキストの判定
+    expense_success = []
+    skipped_expense_count = 0
+    total_expense_amount = 0
 
     for line in lines:
-        parsed = parse_shift_text(line)
-        if parsed:
+        parsed_shift = parse_shift_text(line)
+        if parsed_shift:
             try:
-                add_event_to_calendar(parsed)
-                sal = parsed['salary']
+                add_event_to_calendar(parsed_shift)
+                sal = parsed_shift['salary']
                 total_expected_salary += sal['total_pay']
                 
-                detail_text = f"{parsed['time_str']} (昼{sal['day_hours']}h/深夜{sal['night_hours']}h)"
+                detail_text = f"{parsed_shift['time_str']} (昼{sal['day_hours']}h/深夜{sal['night_hours']}h)"
                 db.insert_money_record(
-                    record_date=parsed["record_date"],
+                    record_date=parsed_shift["record_date"],
                     record_type="income",
                     category="バイト",
-                    title=parsed["summary"],
+                    title=parsed_shift["summary"],
                     amount=sal["total_pay"],
                     status="expected",
                     detail=detail_text,
                     raw_note_id=raw_id,
                     user_id=USER_ID
                 )
-
-                detail = f"・{parsed['date_str']} {parsed['time_str']} {parsed['summary']}\n  💰見込: ¥{sal['total_pay']:,} (昼{sal['day_hours']}h / 深夜{sal['night_hours']}h)"
+                detail = f"・{parsed_shift['date_str']} {parsed_shift['time_str']} {parsed_shift['summary']}\n  💰見込: ¥{sal['total_pay']:,} (昼{sal['day_hours']}h / 深夜{sal['night_hours']}h)"
                 calendar_success.append(detail)
             except Exception as e:
                 calendar_error = str(e)
                 print(f"Calendar / DB Error: {e}")
+            continue
 
-    if calendar_success:
+        parsed_exp = parse_expense_text(line)
+        if parsed_exp:
+            try:
+                # 重複防止チェック
+                existing = db.query(
+                    """
+                    SELECT id FROM public.money_records 
+                    WHERE user_id = %s AND record_date = %s AND title = %s AND amount = %s AND record_type = 'expense'
+                    LIMIT 1
+                    """,
+                    (USER_ID, parsed_exp["record_date"], parsed_exp["title"], parsed_exp["amount"])
+                )
+                if existing:
+                    skipped_expense_count += 1
+                    continue
+
+                db.insert_money_record(
+                    record_date=parsed_exp["record_date"],
+                    record_type="expense",
+                    category=parsed_exp["category"],
+                    title=parsed_exp["title"],
+                    amount=parsed_exp["amount"],
+                    status="confirmed",
+                    detail="",
+                    raw_note_id=raw_id,
+                    user_id=USER_ID
+                )
+                expense_success.append(f"・{parsed_exp['record_date'][5:]} {parsed_exp['title']} ¥{parsed_exp['amount']:,}（{parsed_exp['category']}）")
+                total_expense_amount += parsed_exp["amount"]
+            except Exception as e:
+                print(f"Expense DB Error: {e}")
+
+    # 返信メッセージの組み立て
+    reply_lines = []
+
+    if expense_success or skipped_expense_count > 0:
+        reply_lines.append(f"💳 支出明細 {len(expense_success)}件 を一括記録したで！💰")
+        reply_lines.append("")
+        if len(expense_success) <= 15:
+            reply_lines.extend(expense_success)
+        else:
+            reply_lines.extend(expense_success[:8])
+            reply_lines.append(f"…ほか {len(expense_success) - 8}件")
+        
+        reply_lines.append("")
+        reply_lines.append(f"【支出合計】 ¥{total_expense_amount:,}")
+        if skipped_expense_count > 0:
+            reply_lines.append(f"（※重複登録を防ぐため {skipped_expense_count}件 はスキップ済）")
+        reply_lines.append("\n家計簿ダッシュボードに即時反映されたで！")
+
+    elif calendar_success:
         reply_lines = ["カレンダー & 家計簿に登録したで！📅💰", ""]
         reply_lines.extend(calendar_success)
-        
         if len(calendar_success) > 1:
             reply_lines.append("")
             reply_lines.append(f"【今回の一括合計】 ¥{total_expected_salary:,}")
-
         reply_lines.append("\n（カレンダーは予定名のみスッキリ反映済！）")
-        
         if calendar_error:
             reply_lines.append(f"\n※一部エラー: {calendar_error}")
-            
-        reply_text = "\n".join(reply_lines)
+
     elif calendar_error:
-        reply_text = f"メモは保存したけどカレンダー登録でエラーが出たで💦\n{calendar_error}"
+        reply_lines = [f"メモは保存したけどカレンダー登録でエラーが出たで💦\n{calendar_error}"]
     elif raw_id:
-        reply_text = f"メモを受け取ったで！\n「{text}」\n(ID: {raw_id})"
+        reply_lines = [f"メモを受け取ったで！\n「{text}」\n(ID: {raw_id})"]
     else:
-        reply_text = f"メモを受け取ったで！\n「{text}」"
+        reply_lines = [f"メモを受け取ったで！\n「{text}」"]
+
+    reply_text = "\n".join(reply_lines)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -445,6 +545,9 @@ def handle_text_message(event):
             )
         )
 
+# -------------------------------------------------------------
+# 画像メッセージ処理
+# -------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     try:
