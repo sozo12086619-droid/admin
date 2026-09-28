@@ -454,7 +454,7 @@ async def delete_record(record_id: int):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 # -------------------------------------------------------------
-# 家計簿ダッシュボード画面（安全対策＆エラーハンドリング完備）
+# 家計簿ダッシュボード画面
 # -------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(month: str | None = None):
@@ -492,14 +492,14 @@ def dashboard(month: str | None = None):
                 all_time_expense = tot
         all_time_balance = all_time_income - all_time_expense
 
-        # 3. 2026年の年間累計収入（扶養チェック用）
+        # 3. 2026年の年間累計収入（プレースホルダ経由で安全に検索）
         income_2026_rows = db.query(
             """
             SELECT COALESCE(SUM(amount), 0) as total
             FROM public.money_records
-            WHERE user_id = %s AND record_type = 'income' AND record_date::text LIKE '2026%'
+            WHERE user_id = %s AND record_type = 'income' AND record_date::text LIKE %s
             """,
-            (USER_ID,)
+            (USER_ID, "2026%")
         )
         ytd_income_2026 = 0
         if income_2026_rows and len(income_2026_rows) > 0:
