@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -47,6 +47,146 @@ if not os.path.exists(CREDENTIALS_PATH):
 
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
+
+# -------------------------------------------------------------
+# 過去アプリのデータ完全同期（2025年7月〜2026年8月）
+# -------------------------------------------------------------
+def sync_past_app_data():
+    past_records = [
+        # 2025-07 (合計: 80,628円)
+        ("2025-07-31", "食費", "食費", 33988),
+        ("2025-07-31", "日用品", "日用品", 880),
+        ("2025-07-31", "交通費", "交通費", 3100),
+        ("2025-07-31", "衣服", "衣服", 4200),
+        ("2025-07-31", "趣味", "趣味", 37900),
+        ("2025-07-31", "その他", "その他", 560),
+
+        # 2025-08 (合計: 206,971円)
+        ("2025-08-31", "食費", "食費", 47474),
+        ("2025-08-31", "日用品", "日用品", 3077),
+        ("2025-08-31", "交通費", "交通費", 2800),
+        ("2025-08-31", "交際費", "交際費", 6080),
+        ("2025-08-31", "趣味", "趣味", 144656),
+        ("2025-08-31", "その他", "その他", 2884),
+
+        # 2025-09 (合計: 135,087円)
+        ("2025-09-30", "食費", "食費", 27374),
+        ("2025-09-30", "外食費", "外食費", 3834),
+        ("2025-09-30", "日用品", "日用品", 12800),
+        ("2025-09-30", "趣味", "趣味", 90679),
+        ("2025-09-30", "自分磨き", "自分磨き", 400),
+
+        # 2025-10 (合計: 204,994円)
+        ("2025-10-31", "食費", "食費", 14201),
+        ("2025-10-31", "日用品", "日用品", 12777),
+        ("2025-10-31", "趣味", "趣味", 34438),
+        ("2025-10-31", "自分磨き", "自分磨き", 102387),
+        ("2025-10-31", "その他", "その他", 41191),
+
+        # 2025-11 (合計: 193,622円)
+        ("2025-11-30", "食費", "食費", 10010),
+        ("2025-11-30", "日用品", "日用品", 21950),
+        ("2025-11-30", "交際費", "交際費", 570),
+        ("2025-11-30", "趣味", "趣味", 55694),
+        ("2025-11-30", "自分磨き", "自分磨き", 55398),
+        ("2025-11-30", "その他", "その他", 50000),
+
+        # 2025-12 (合計: 121,281円)
+        ("2025-12-31", "食費", "食費", 6799),
+        ("2025-12-31", "日用品", "日用品", 1288),
+        ("2025-12-31", "交際費", "交際費", 4310),
+        ("2025-12-31", "趣味", "趣味", 28093),
+        ("2025-12-31", "自分磨き", "自分磨き", 80791),
+
+        # 2026-01 (合計: 193,327円)
+        ("2026-01-31", "食費", "食費", 63458),
+        ("2026-01-31", "日用品", "日用品", 6229),
+        ("2026-01-31", "趣味", "趣味", 122890),
+        ("2026-01-31", "その他", "その他", 750),
+
+        # 2026-02 (合計: 90,597円)
+        ("2026-02-28", "食費", "食費", 14517),
+        ("2026-02-28", "外食費", "外食費", 1419),
+        ("2026-02-28", "日用品", "日用品", 6328),
+        ("2026-02-28", "交際費", "交際費", 2234),
+        ("2026-02-28", "趣味", "趣味", 34789),
+        ("2026-02-28", "自分磨き", "自分磨き", 30800),
+        ("2026-02-28", "その他", "その他", 510),
+
+        # 2026-03 (合計: 118,150円)
+        ("2026-03-31", "食費", "食費", 19161),
+        ("2026-03-31", "日用品", "日用品", 7574),
+        ("2026-03-31", "交際費", "交際費", 10650),
+        ("2026-03-31", "趣味", "趣味", 71000),
+        ("2026-03-31", "その他", "その他", 9765),
+
+        # 2026-04 (合計: 80,219円)
+        ("2026-04-30", "食費", "食費", 17317),
+        ("2026-04-30", "日用品", "日用品", 8999),
+        ("2026-04-30", "趣味", "趣味", 2500),
+        ("2026-04-30", "自分磨き", "自分磨き", 34920),
+        ("2026-04-30", "その他", "その他", 16483),
+
+        # 2026-05 (合計: 129,592円)
+        ("2026-05-31", "食費", "食費", 27075),
+        ("2026-05-31", "日用品", "日用品", 15019),
+        ("2026-05-31", "交通費", "交通費", 3100),
+        ("2026-05-31", "交際費", "交際費", 3168),
+        ("2026-05-31", "趣味", "趣味", 41748),
+        ("2026-05-31", "自分磨き", "自分磨き", 24902),
+        ("2026-05-31", "その他", "その他", 14580),
+
+        # 2026-06 (合計: 170,127円)
+        ("2026-06-30", "食費", "食費", 27098),
+        ("2026-06-30", "日用品", "日用品", 19159),
+        ("2026-06-30", "交際費", "交際費", 34590),
+        ("2026-06-30", "趣味", "趣味", 3030),
+        ("2026-06-30", "自分磨き", "自分磨き", 79780),
+        ("2026-06-30", "ガソリン", "ガソリン", 3500),
+        ("2026-06-30", "その他", "その他", 2970),
+
+        # 2026-07 (合計: 106,595円)
+        ("2026-07-31", "食費", "食費", 33401),
+        ("2026-07-31", "日用品", "日用品", 12000),
+        ("2026-07-31", "交際費", "交際費", 7925),
+        ("2026-07-31", "趣味", "趣味 (Amazon含む)", 14391),
+        ("2026-07-31", "自分磨き", "自分磨き", 34078),
+        ("2026-07-31", "ガソリン", "ガソリン", 4800),
+
+        # 2026-08 (合計: 111,968円)
+        ("2026-08-31", "食費", "食費", 22352),
+        ("2026-08-31", "日用品", "日用品", 13028),
+        ("2026-08-31", "交際費", "交際費", 3276),
+        ("2026-08-31", "趣味", "趣味", 69119),
+        ("2026-08-31", "ガソリン", "ガソリン", 4033),
+        ("2026-08-31", "その他", "その他", 160),
+    ]
+
+    # 古い過去引き継ぎレコードを安全に一掃して完全再同期
+    db.query(
+        "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
+        (USER_ID,)
+    )
+
+    for rec_date, cat, title, amt in past_records:
+        try:
+            db.insert_money_record(
+                record_date=rec_date,
+                record_type="expense",
+                category=cat,
+                title=title,
+                amount=amt,
+                status="confirmed",
+                detail="過去アプリより引き継ぎ",
+                user_id=USER_ID
+            )
+        except Exception as e:
+            print(f"Past import error: {e}")
+
+try:
+    sync_past_app_data()
+except Exception as e:
+    print(f"Past data sync error: {e}")
 
 def get_calendar_service():
     if not os.path.exists(CREDENTIALS_PATH):
@@ -155,13 +295,23 @@ def add_event_to_calendar(parsed):
 
 def guess_category(title: str) -> str:
     t = title.lower()
-    if any(k in t for k in ["すき家", "サンエー", "セブン", "ファミリーマート", "ファミマ", "ローソン", "ミスタードーナツ", "ミスド", "マック", "スーパー", "食堂", "カフェ", "弁当"]):
+    if any(k in t for k in ["外食", "レストラン", "居酒屋"]):
+        return "外食費"
+    elif any(k in t for k in ["すき家", "サンエー", "セブン", "ファミリーマート", "ファミマ", "ローソン", "ミスタードーナツ", "ミスド", "マック", "スーパー", "食堂", "カフェ", "弁当"]):
         return "食費"
     elif any(k in t for k in ["ダイソー", "マツモトキヨシ", "マツキヨ", "薬", "ドラッグ", "日用品", "セリア"]):
         return "日用品"
+    elif any(k in t for k in ["脱毛", "美容", "サロン", "カット", "ジム", "サウナ", "エステ"]):
+        return "自分磨き"
+    elif any(k in t for k in ["ガソリン", "出光", "eneos", "コスモ"]):
+        return "ガソリン"
+    elif any(k in t for k in ["服", "ユニクロ", "gu", "zara", "靴"]):
+        return "衣服"
+    elif any(k in t for k in ["飲み会", "割り勘", "プレゼント"]):
+        return "交際費"
     elif any(k in t for k in ["apple", "amazon", "カイカツ", "快活", "netflix", "spotify", "映画", "プライム"]):
-        return "趣味・娯楽"
-    elif any(k in t for k in ["電車", "バス", "タクシー", "ガソリン", "定期"]):
+        return "趣味"
+    elif any(k in t for k in ["電車", "バス", "タクシー", "定期", "高速"]):
         return "交通費"
     return "その他"
 
@@ -221,7 +371,7 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
         f'    "date": "YYYY-MM-DD形式。不明なら「{now_str}」",\n'
         f'    "store": "店名や摘要",\n'
         f'    "amount": 金額（正の整数）,\n'
-        f'    "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
+        f'    "category": "食費" または "外食費" または "日用品" または "趣味" または "自分磨き" または "交通費" または "ガソリン" または "交際費" または "衣服" または "その他",\n'
         f'    "detail": "品目等"\n'
         f"  }}\n"
         f"]"
@@ -266,7 +416,49 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
             raise Exception(f"HTTP {he.code}: {err_msg}")
 
 # -------------------------------------------------------------
-# 家計簿ダッシュボード（リロードボタン・グラフ・全期間完全対応）
+# 手動入力用 API エンドポイント
+# -------------------------------------------------------------
+@app.post("/api/records")
+async def add_manual_record(req: Request):
+    try:
+        data = await req.json()
+        rec_date = data.get("record_date")
+        rec_type = data.get("record_type", "expense")
+        category = data.get("category", "その他")
+        title = data.get("title", "").strip() or "手動入力"
+        amount = int(data.get("amount", 0))
+        detail = data.get("detail", "").strip()
+
+        if amount <= 0 or not rec_date:
+            return JSONResponse({"status": "error", "message": "金額と日付は必須です"}, status_code=400)
+
+        db.insert_money_record(
+            record_date=rec_date,
+            record_type=rec_type,
+            category=category,
+            title=title,
+            amount=amount,
+            status="confirmed",
+            detail=detail,
+            user_id=USER_ID
+        )
+        return JSONResponse({"status": "success"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.delete("/api/records/{record_id}")
+async def delete_record(record_id: int):
+    try:
+        db.query(
+            "DELETE FROM public.money_records WHERE id = %s AND user_id = %s",
+            (record_id, USER_ID)
+        )
+        return JSONResponse({"status": "success"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+# -------------------------------------------------------------
+# 家計簿ダッシュボード画面
 # -------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(month: str | None = None):
@@ -301,7 +493,7 @@ def dashboard(month: str | None = None):
             all_time_expense = int(row["total"])
     all_time_balance = all_time_income - all_time_expense
 
-    # 3. 月別推移（直近12ヶ月分）
+    # 3. 月別推移（直近15ヶ月分）
     monthly_trends = db.query(
         """
         SELECT 
@@ -312,7 +504,7 @@ def dashboard(month: str | None = None):
         WHERE user_id = %s
         GROUP BY SUBSTRING(record_date, 1, 7)
         ORDER BY ym ASC
-        LIMIT 12
+        LIMIT 15
         """,
         (USER_ID,)
     )
@@ -320,7 +512,7 @@ def dashboard(month: str | None = None):
     trend_incomes = [int(r["inc"]) for r in monthly_trends]
     trend_expenses = [int(r["exp"]) for r in monthly_trends]
 
-    # 4. 当月のカテゴリ別支出内訳
+    # 4. 当月のカテゴリ別支出内訳 & カラーパレット
     category_rows = db.query(
         """
         SELECT category, COALESCE(SUM(amount), 0) as cat_total
@@ -331,8 +523,47 @@ def dashboard(month: str | None = None):
         """,
         (USER_ID, f"{target_month}%")
     )
-    cat_labels = [r["category"] for r in category_rows]
-    cat_data = [int(r["cat_total"]) for r in category_rows]
+
+    CAT_COLORS = {
+        "食費": "#68d391",
+        "外食費": "#f6ad55",
+        "日用品": "#63b3ed",
+        "趣味": "#e53e3e",
+        "自分磨き": "#3182ce",
+        "交際費": "#d69e2e",
+        "交通費": "#ed64a6",
+        "ガソリン": "#38a169",
+        "衣服": "#4c51bf",
+        "その他": "#a0aec0",
+    }
+
+    cat_labels = []
+    cat_data = []
+    cat_colors = []
+    total_exp_month = summary["expenses"] or 1
+
+    category_list_html = ""
+    for r in category_rows:
+        c_name = r["category"]
+        c_amt = int(r["cat_total"])
+        cat_labels.append(c_name)
+        cat_data.append(c_amt)
+        color = CAT_COLORS.get(c_name, "#a0aec0")
+        cat_colors.append(color)
+
+        pct = round((c_amt / total_exp_month) * 100, 1)
+        category_list_html += f"""
+        <div class="cat-row">
+            <div class="cat-row-left">
+                <span class="cat-color-dot" style="background-color: {color};"></span>
+                <span class="cat-row-name">{c_name}</span>
+            </div>
+            <div class="cat-row-right">
+                <span class="cat-row-pct">{pct}%</span>
+                <span class="cat-row-amt">¥{c_amt:,}</span>
+            </div>
+        </div>
+        """
 
     # 5. 当月の取引レコード一覧
     records = db.query(
@@ -356,18 +587,23 @@ def dashboard(month: str | None = None):
             detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
             
             records_html += f"""
-            <div class="record-card">
+            <div class="record-card" id="rec-{r['id']}">
                 <div class="record-left">
                     <span class="badge {badge_class}">{badge_text}</span>
                     <span class="record-title">{r["title"]}</span>
                     <div class="record-date">{r["record_date"]}</div>
                     {detail_line}
                 </div>
-                <div class="record-amount {'amount-income' if is_income else 'amount-expense'}">
-                    {sign}¥{r["amount"]:,}
+                <div class="record-right">
+                    <div class="record-amount {'amount-income' if is_income else 'amount-expense'}">
+                        {sign}¥{r["amount"]:,}
+                    </div>
+                    <button class="delete-btn" onclick="deleteRecord({r['id']})" title="削除">✕</button>
                 </div>
             </div>
             """
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
     html_content = f"""
     <!DOCTYPE html>
@@ -379,11 +615,10 @@ def dashboard(month: str | None = None):
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
             * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-            body {{ background-color: #f4f6f9; color: #333; padding-bottom: 50px; }}
+            body {{ background-color: #f7f9fa; color: #2d3748; padding-bottom: 70px; }}
             
-            /* ヘッダー＆更新ボタン */
             .header {{ 
-                background: #1e293b; 
+                background: #1a202c; 
                 color: white; 
                 padding: 14px 20px; 
                 display: flex; 
@@ -392,82 +627,96 @@ def dashboard(month: str | None = None):
                 position: sticky; 
                 top: 0; 
                 z-index: 100; 
-                box-shadow: 0 2px 8px rgba(0,0,0,0.15); 
+                box-shadow: 0 2px 8px rgba(0,0,0,0.12); 
             }}
-            .header h1 {{ font-size: 1.1rem; font-weight: 700; letter-spacing: 0.5px; }}
-            .reload-btn {{
-                background: #334155;
-                color: #e2e8f0;
-                border: 1px solid #475569;
-                padding: 6px 12px;
+            .header h1 {{ font-size: 1.05rem; font-weight: 700; }}
+            .header-actions {{ display: flex; gap: 8px; }}
+            .btn-action {{
+                border: none;
+                padding: 7px 12px;
                 border-radius: 8px;
-                font-size: 0.82rem;
-                font-weight: 600;
+                font-size: 0.8rem;
+                font-weight: 700;
                 cursor: pointer;
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                transition: all 0.2s;
+                transition: transform 0.1s;
             }}
-            .reload-btn:active {{
-                background: #2563eb;
-                color: white;
-                transform: scale(0.96);
-            }}
+            .btn-action:active {{ transform: scale(0.95); }}
+            .btn-reload {{ background: #2d3748; color: #edf2f7; }}
+            .btn-add {{ background: #3182ce; color: white; }}
 
-            .container {{ max-width: 550px; margin: 0 auto; padding: 16px; }}
+            .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
 
-            /* 全期間サマリー */
-            .all-time-card {{ background: linear-gradient(135deg, #1e293b, #334155); color: white; border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(30,41,59,0.15); }}
-            .all-time-title {{ font-size: 0.8rem; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
-            .all-time-balance {{ font-size: 2.1rem; font-weight: 800; color: {'#38bdf8' if all_time_balance >= 0 else '#f87171'}; }}
-            .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.85rem; }}
-            .all-time-grid span {{ color: #94a3b8; display: block; font-size: 0.75rem; }}
+            .all-time-card {{ background: linear-gradient(135deg, #2d3748, #1a202c); color: white; border-radius: 16px; padding: 16px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
+            .all-time-title {{ font-size: 0.75rem; color: #a0aec0; letter-spacing: 0.5px; margin-bottom: 4px; }}
+            .all-time-balance {{ font-size: 2rem; font-weight: 800; color: {'#63b3ed' if all_time_balance >= 0 else '#fc8181'}; }}
+            .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.82rem; }}
+            .all-time-grid span {{ color: #a0aec0; display: block; font-size: 0.72rem; }}
 
-            /* 月ナビゲーション */
-            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }}
-            .month-nav a {{ text-decoration: none; color: #2563eb; font-size: 0.9rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #eff6ff; }}
-            .current-month {{ font-size: 1.15rem; font-weight: 700; color: #0f172a; }}
+            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }}
+            .month-nav a {{ text-decoration: none; color: #3182ce; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #ebf8ff; }}
+            .current-month {{ font-size: 1.15rem; font-weight: 800; color: #1a202c; }}
 
-            /* 当月カード */
-            .summary-card {{ background: white; border-radius: 14px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); margin-bottom: 16px; }}
-            .summary-main {{ text-align: center; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px dashed #e2e8f0; }}
-            .summary-main-label {{ font-size: 0.8rem; color: #64748b; margin-bottom: 4px; }}
-            .summary-main-val {{ font-size: 1.8rem; font-weight: 800; color: #10b981; }}
+            .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
+            .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
+            .summary-main-label {{ font-size: 0.78rem; color: #718096; margin-bottom: 2px; }}
+            .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #38a169; }}
             .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
-            .summary-sub-label {{ font-size: 0.75rem; color: #64748b; }}
-            .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 3px; }}
-            .val-expense {{ color: #ef4444; }}
-            .val-balance {{ color: #0284c7; }}
+            .summary-sub-label {{ font-size: 0.75rem; color: #718096; }}
+            .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 2px; }}
+            .val-expense {{ color: #e53e3e; }}
+            .val-balance {{ color: #3182ce; }}
 
-            /* グラフカード */
-            .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }}
-            .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #334155; margin-bottom: 12px; }}
+            .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
+            .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #2d3748; margin-bottom: 12px; }}
 
-            /* リスト一覧 */
-            .section-title {{ font-size: 0.95rem; font-weight: 700; color: #475569; margin: 18px 0 10px 4px; }}
-            .record-card {{ background: white; border-radius: 12px; padding: 13px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
-            .record-left {{ display: flex; flex-direction: column; gap: 3px; }}
-            .record-title {{ font-size: 0.95rem; font-weight: 700; color: #1e293b; margin-left: 3px; }}
-            .record-date {{ font-size: 0.72rem; color: #94a3b8; }}
-            .record-detail {{ font-size: 0.75rem; color: #64748b; margin-top: 1px; }}
-            .badge {{ font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
-            .badge-income {{ background: #ecfdf5; color: #059669; }}
-            .badge-expense {{ background: #fef2f2; color: #dc2626; }}
-            .record-amount {{ font-size: 1.05rem; font-weight: 800; white-space: nowrap; }}
-            .amount-income {{ color: #059669; }}
-            .amount-expense {{ color: #dc2626; }}
-            .empty-state {{ text-align: center; padding: 26px; color: #94a3b8; font-size: 0.85rem; background: white; border-radius: 12px; }}
+            .category-list {{ margin-top: 14px; border-top: 1px solid #edf2f7; padding-top: 10px; }}
+            .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f7fafc; }}
+            .cat-row:last-child {{ border-bottom: none; }}
+            .cat-row-left {{ display: flex; align-items: center; gap: 8px; }}
+            .cat-color-dot {{ width: 11px; height: 11px; border-radius: 50%; display: inline-block; }}
+            .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #2d3748; }}
+            .cat-row-right {{ display: flex; align-items: center; gap: 12px; }}
+            .cat-row-pct {{ font-size: 0.8rem; color: #718096; min-width: 42px; text-align: right; }}
+            .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; min-width: 75px; text-align: right; }}
+
+            .section-title {{ font-size: 0.92rem; font-weight: 700; color: #4a5568; margin: 18px 0 10px 4px; }}
+            .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }}
+            .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
+            .record-title {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; margin-left: 2px; }}
+            .record-date {{ font-size: 0.7rem; color: #a0aec0; }}
+            .record-detail {{ font-size: 0.72rem; color: #718096; }}
+            .badge {{ font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
+            .badge-income {{ background: #c6f6d5; color: #22543d; }}
+            .badge-expense {{ background: #fed7d7; color: #742a2a; }}
+            .record-right {{ display: flex; align-items: center; gap: 10px; }}
+            .record-amount {{ font-size: 1rem; font-weight: 800; white-space: nowrap; }}
+            .amount-income {{ color: #38a169; }}
+            .amount-expense {{ color: #e53e3e; }}
+            .delete-btn {{ background: none; border: none; color: #cbd5e0; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
+            .delete-btn:hover {{ color: #e53e3e; }}
+            .empty-state {{ text-align: center; padding: 24px; color: #a0aec0; font-size: 0.85rem; background: white; border-radius: 12px; }}
+
+            .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
+            .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
+            .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #1a202c; display: flex; justify-content: space-between; }}
+            .form-group {{ margin-bottom: 12px; }}
+            .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #718096; margin-bottom: 4px; }}
+            .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
+            .form-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+            .btn-submit {{ width: 100%; background: #3182ce; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
+            .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #a0aec0; }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>家計簿 & シフト管理</h1>
-            <button class="reload-btn" onclick="forceReload()">🔄 更新</button>
+            <div class="header-actions">
+                <button class="btn-action btn-add" onclick="openModal()">➕ 手入力</button>
+                <button class="btn-action btn-reload" onclick="forceReload()">🔄</button>
+            </div>
         </div>
 
         <div class="container">
-            <!-- 全期間の通算収支 -->
             <div class="all-time-card">
                 <div class="all-time-title">💰 全期間の通算残高（総収支）</div>
                 <div class="all-time-balance">¥{all_time_balance:,}</div>
@@ -478,25 +727,22 @@ def dashboard(month: str | None = None):
                     </div>
                     <div>
                         <span>通算総支出</span>
-                        <strong style="color: #fca5a5;">-¥{all_time_expense:,}</strong>
+                        <strong style="color: #feb2b2;">-¥{all_time_expense:,}</strong>
                     </div>
                 </div>
             </div>
 
-            <!-- 月別推移グラフ -->
             <div class="chart-card">
-                <div class="chart-title">📊 月別 収支推移</div>
+                <div class="chart-title">📊 月別 収支推移（全期間）</div>
                 <canvas id="monthlyTrendChart" height="150"></canvas>
             </div>
 
-            <!-- 当月のナビゲーション -->
             <div class="month-nav">
                 <a href="/?month={prev_month_str}">◀ 前月</a>
                 <div class="current-month">{year_str}年 {month_str}月</div>
                 <a href="/?month={next_month_str}">翌月 ▶</a>
             </div>
 
-            <!-- 当月のサマリーカード -->
             <div class="summary-card">
                 <div class="summary-main">
                     <div class="summary-main-label">{month_str}月 バイト給料（見込）</div>
@@ -514,28 +760,154 @@ def dashboard(month: str | None = None):
                 </div>
             </div>
 
-            <!-- 当月のカテゴリ別支出内訳グラフ -->
             {f'''
             <div class="chart-card">
-                <div class="chart-title">🍩 {month_str}月 支出内訳</div>
-                <canvas id="categoryChart" height="140"></canvas>
+                <div class="chart-title">🍩 {month_str}月 支出割合・内訳</div>
+                <div style="max-width: 260px; margin: 0 auto 12px auto;">
+                    <canvas id="categoryChart" height="240"></canvas>
+                </div>
+                <div class="category-list">
+                    {category_list_html}
+                </div>
             </div>
             ''' if cat_data else ''}
 
-            <!-- 履歴リスト -->
-            <div class="section-title">登録済みのシフト・収支一覧（{len(records)}件）</div>
+            <div class="section-title">登録済みレコード一覧（{len(records)}件）</div>
             {records_html}
         </div>
 
+        <div class="modal-overlay" id="manualModal">
+            <div class="modal-content">
+                <div class="modal-title">
+                    <span>収支を手動入力</span>
+                    <button class="btn-close" onclick="closeModal()">✕</button>
+                </div>
+                <form id="recordForm" onsubmit="submitManualRecord(event)">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">日付</label>
+                            <input type="date" class="form-control" id="f_date" value="{today_str}" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">収支タイプ</label>
+                            <select class="form-control" id="f_type" onchange="toggleType()">
+                                <option value="expense">支出 (-)</option>
+                                <option value="income">収入 (+)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">カテゴリ</label>
+                        <select class="form-control" id="f_category">
+                            <option value="食費">食費</option>
+                            <option value="外食費">外食費</option>
+                            <option value="日用品">日用品</option>
+                            <option value="趣味">趣味</option>
+                            <option value="自分磨き">自分磨き</option>
+                            <option value="交際費">交際費</option>
+                            <option value="交通費">交通費</option>
+                            <option value="ガソリン">ガソリン</option>
+                            <option value="衣服">衣服</option>
+                            <option value="その他">その他</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">店名・項目名</label>
+                        <input type="text" class="form-control" id="f_title" placeholder="例: セブン-イレブン、給料など" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">金額（円）</label>
+                        <input type="number" class="form-control" id="f_amount" placeholder="例: 1500" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">メモ・詳細（任意）</label>
+                        <input type="text" class="form-control" id="f_detail" placeholder="例: 友達とお茶">
+                    </div>
+                    <button type="submit" class="btn-submit">登録する</button>
+                </form>
+            </div>
+        </div>
+
         <script>
-            // キャッシュを破棄して最新データを強制再読み込みする関数
             function forceReload() {{
                 const url = new URL(window.location.href);
                 url.searchParams.set('_t', Date.now());
                 window.location.href = url.toString();
             }}
 
-            // 月別推移バーチャート
+            function openModal() {{
+                document.getElementById('manualModal').style.display = 'flex';
+            }}
+
+            function closeModal() {{
+                document.getElementById('manualModal').style.display = 'none';
+            }}
+
+            function toggleType() {{
+                const t = document.getElementById('f_type').value;
+                const cat = document.getElementById('f_category');
+                if (t === 'income') {{
+                    cat.innerHTML = '<option value="バイト">バイト</option><option value="臨時収入">臨時収入</option><option value="給料">給料</option><option value="その他">その他</option>';
+                }} else {{
+                    cat.innerHTML = `
+                        <option value="食費">食費</option>
+                        <option value="外食費">外食費</option>
+                        <option value="日用品">日用品</option>
+                        <option value="趣味">趣味</option>
+                        <option value="自分磨き">自分磨き</option>
+                        <option value="交際費">交際費</option>
+                        <option value="交通費">交通費</option>
+                        <option value="ガソリン">ガソリン</option>
+                        <option value="衣服">衣服</option>
+                        <option value="その他">その他</option>
+                    `;
+                }}
+            }}
+
+            async function submitManualRecord(e) {{
+                e.preventDefault();
+                const payload = {{
+                    record_date: document.getElementById('f_date').value,
+                    record_type: document.getElementById('f_type').value,
+                    category: document.getElementById('f_category').value,
+                    title: document.getElementById('f_title').value,
+                    amount: parseInt(document.getElementById('f_amount').value),
+                    detail: document.getElementById('f_detail').value
+                }};
+
+                try {{
+                    const res = await fetch('/api/records', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify(payload)
+                    }});
+                    if (res.ok) {{
+                        const ym = payload.record_date.substring(0, 7);
+                        window.location.href = '/?month=' + ym + '&_t=' + Date.now();
+                    }} else {{
+                        alert('登録に失敗しました💦');
+                    }}
+                }} catch (err) {{
+                    alert('通信エラー: ' + err);
+                }}
+            }}
+
+            async function deleteRecord(id) {{
+                if (!confirm('この明細を削除してもよろしいですか？')) return;
+                try {{
+                    const res = await fetch('/api/records/' + id, {{ method: 'DELETE' }});
+                    if (res.ok) {{
+                        const el = document.getElementById('rec-' + id);
+                        if (el) el.remove();
+                        forceReload();
+                    }} else {{
+                        alert('削除に失敗しました💦');
+                    }}
+                }} catch (err) {{
+                    alert('通信エラー: ' + err);
+                }}
+            }}
+
             const trendCtx = document.getElementById('monthlyTrendChart').getContext('2d');
             new Chart(trendCtx, {{
                 type: 'bar',
@@ -545,13 +917,13 @@ def dashboard(month: str | None = None):
                         {{
                             label: '収入',
                             data: {json.dumps(trend_incomes)},
-                            backgroundColor: '#10b981',
+                            backgroundColor: '#38a169',
                             borderRadius: 4
                         }},
                         {{
                             label: '支出',
                             data: {json.dumps(trend_expenses)},
-                            backgroundColor: '#ef4444',
+                            backgroundColor: '#e53e3e',
                             borderRadius: 4
                         }}
                     ]
@@ -570,7 +942,6 @@ def dashboard(month: str | None = None):
                 }}
             }});
 
-            // カテゴリ別支出ドーナツチャート
             const catCanvas = document.getElementById('categoryChart');
             if (catCanvas) {{
                 new Chart(catCanvas.getContext('2d'), {{
@@ -579,13 +950,16 @@ def dashboard(month: str | None = None):
                         labels: {json.dumps(cat_labels)},
                         datasets: [{{
                             data: {json.dumps(cat_data)},
-                            backgroundColor: ['#3b82f6', '#ec4899', '#f59e0b', '#10b981', '#8b5cf6', '#64748b']
+                            backgroundColor: {json.dumps(cat_colors)},
+                            borderWidth: 2,
+                            borderColor: '#ffffff'
                         }}]
                     }},
                     options: {{
                         responsive: true,
+                        cutout: '58%',
                         plugins: {{
-                            legend: {{ position: 'right', labels: {{ boxWidth: 12, font: {{ size: 11 }} }} }}
+                            legend: {{ display: false }}
                         }}
                     }}
                 }});
