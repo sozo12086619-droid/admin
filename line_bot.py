@@ -3,6 +3,7 @@ import re
 import json
 import time
 import base64
+import traceback
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
@@ -162,13 +163,12 @@ def sync_past_app_data():
         ("2026-08-31", "income", "給料", "給料まとめ", 117308),
     ]
 
-    db.query(
-        "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
-        (USER_ID,)
-    )
-
-    for rec_date, r_type, cat, title, amt in past_records:
-        try:
+    try:
+        db.query(
+            "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
+            (USER_ID,)
+        )
+        for rec_date, r_type, cat, title, amt in past_records:
             db.insert_money_record(
                 record_date=rec_date,
                 record_type=r_type,
@@ -179,8 +179,8 @@ def sync_past_app_data():
                 detail="過去アプリより引き継ぎ",
                 user_id=USER_ID
             )
-        except Exception as e:
-            print(f"Past sync error: {e}")
+    except Exception as e:
+        print(f"Past sync error: {e}")
 
 try:
     sync_past_app_data()
@@ -414,9 +414,6 @@ def analyze_expense_image(image_bytes: bytes) -> list[dict]:
             err_msg = he.read().decode("utf-8", errors="ignore")
             raise Exception(f"HTTP {he.code}: {err_msg}")
 
-# -------------------------------------------------------------
-# 手動入力用 API エンドポイント
-# -------------------------------------------------------------
 @app.post("/api/records")
 async def add_manual_record(req: Request):
     try:
@@ -457,364 +454,145 @@ async def delete_record(record_id: int):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 # -------------------------------------------------------------
-# 家計簿ダッシュボード画面
+# 家計簿ダッシュボード画面（安全対策＆エラーハンドリング完備）
 # -------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def dashboard(month: str | None = None):
-    target_month = month or datetime.now().strftime("%Y-%m")
-    
-    curr_dt = datetime.strptime(f"{target_month}-01", "%Y-%m-%d")
-    prev_dt = (curr_dt - timedelta(days=1)).replace(day=1)
-    next_dt = (curr_dt + timedelta(days=32)).replace(day=1)
-    prev_month_str = prev_dt.strftime("%Y-%m")
-    next_month_str = next_dt.strftime("%Y-%m")
-    year_str, month_str = target_month.split("-")
+    try:
+        target_month = month or datetime.now().strftime("%Y-%m")
+        
+        curr_dt = datetime.strptime(f"{target_month}-01", "%Y-%m-%d")
+        prev_dt = (curr_dt - timedelta(days=1)).replace(day=1)
+        next_dt = (curr_dt + timedelta(days=32)).replace(day=1)
+        prev_month_str = prev_dt.strftime("%Y-%m")
+        next_month_str = next_dt.strftime("%Y-%m")
+        year_str, month_str = target_month.split("-")
 
-    # 1. 選択月のサマリー
-    summary = db.fetch_monthly_money_summary(target_month, USER_ID)
+        # 1. 選択月のサマリー
+        summary = db.fetch_monthly_money_summary(target_month, USER_ID)
 
-    # 2. 全期間の通算収支
-    all_time_rows = db.query(
-        """
-        SELECT record_type, COALESCE(SUM(amount), 0) as total
-        FROM public.money_records
-        WHERE user_id = %s
-        GROUP BY record_type
-        """,
-        (USER_ID,)
-    )
-    all_time_income = 0
-    all_time_expense = 0
-    for row in all_time_rows:
-        if row["record_type"] == "income":
-            all_time_income = int(row["total"])
-        elif row["record_type"] == "expense":
-            all_time_expense = int(row["total"])
-    all_time_balance = all_time_income - all_time_expense
+        # 2. 全期間の通算収支
+        all_time_rows = db.query(
+            """
+            SELECT record_type, COALESCE(SUM(amount), 0) as total
+            FROM public.money_records
+            WHERE user_id = %s
+            GROUP BY record_type
+            """,
+            (USER_ID,)
+        )
+        all_time_income = 0
+        all_time_expense = 0
+        for row in (all_time_rows or []):
+            rtype = row.get("record_type") if isinstance(row, dict) else row[0]
+            tot = int((row.get("total") if isinstance(row, dict) else row[1]) or 0)
+            if rtype == "income":
+                all_time_income = tot
+            elif rtype == "expense":
+                all_time_expense = tot
+        all_time_balance = all_time_income - all_time_expense
 
-    # 3. 2026年の年間累計収入（扶養チェック用）
-    income_2026_rows = db.query(
-        """
-        SELECT COALESCE(SUM(amount), 0) as total
-        FROM public.money_records
-        WHERE user_id = %s AND record_type = 'income' AND record_date LIKE '2026%'
-        """,
-        (USER_ID,)
-    )
-    ytd_income_2026 = int(income_2026_rows[0]["total"]) if income_2026_rows else 0
-    limit_103 = 1030000
-    rem_103 = limit_103 - ytd_income_2026
-    pct_103 = min(100, round((ytd_income_2026 / limit_103) * 100, 1))
+        # 3. 2026年の年間累計収入（扶養チェック用）
+        income_2026_rows = db.query(
+            """
+            SELECT COALESCE(SUM(amount), 0) as total
+            FROM public.money_records
+            WHERE user_id = %s AND record_type = 'income' AND record_date::text LIKE '2026%'
+            """,
+            (USER_ID,)
+        )
+        ytd_income_2026 = 0
+        if income_2026_rows and len(income_2026_rows) > 0:
+            first_row = income_2026_rows[0]
+            val = first_row.get("total") if isinstance(first_row, dict) else first_row[0]
+            ytd_income_2026 = int(val or 0)
 
-    # 4. 月別推移（直近15ヶ月分）
-    monthly_trends = db.query(
-        """
-        SELECT 
-            SUBSTRING(record_date, 1, 7) as ym,
-            COALESCE(SUM(CASE WHEN record_type = 'income' THEN amount ELSE 0 END), 0) as inc,
-            COALESCE(SUM(CASE WHEN record_type = 'expense' THEN amount ELSE 0 END), 0) as exp
-        FROM public.money_records
-        WHERE user_id = %s
-        GROUP BY SUBSTRING(record_date, 1, 7)
-        ORDER BY ym ASC
-        LIMIT 15
-        """,
-        (USER_ID,)
-    )
-    trend_labels = [r["ym"] for r in monthly_trends]
-    trend_incomes = [int(r["inc"]) for r in monthly_trends]
-    trend_expenses = [int(r["exp"]) for r in monthly_trends]
+        limit_103 = 1030000
+        rem_103 = limit_103 - ytd_income_2026
+        pct_103 = min(100.0, round((ytd_income_2026 / limit_103) * 100, 1))
 
-    # 5. 当月のカテゴリ別支出内訳 & カラーパレット
-    category_rows = db.query(
-        """
-        SELECT category, COALESCE(SUM(amount), 0) as cat_total
-        FROM public.money_records
-        WHERE user_id = %s AND record_date LIKE %s AND record_type = 'expense'
-        GROUP BY category
-        ORDER BY cat_total DESC
-        """,
-        (USER_ID, f"{target_month}%")
-    )
+        # 4. 月別推移（直近15ヶ月分）
+        monthly_trends = db.query(
+            """
+            SELECT 
+                SUBSTRING(record_date::text, 1, 7) as ym,
+                COALESCE(SUM(CASE WHEN record_type = 'income' THEN amount ELSE 0 END), 0) as inc,
+                COALESCE(SUM(CASE WHEN record_type = 'expense' THEN amount ELSE 0 END), 0) as exp
+            FROM public.money_records
+            WHERE user_id = %s
+            GROUP BY SUBSTRING(record_date::text, 1, 7)
+            ORDER BY ym ASC
+            LIMIT 15
+            """,
+            (USER_ID,)
+        )
+        trend_labels = []
+        trend_incomes = []
+        trend_expenses = []
+        for r in (monthly_trends or []):
+            ym_val = r.get("ym") if isinstance(r, dict) else r[0]
+            inc_val = r.get("inc") if isinstance(r, dict) else r[1]
+            exp_val = r.get("exp") if isinstance(r, dict) else r[2]
+            trend_labels.append(str(ym_val or ""))
+            trend_incomes.append(int(inc_val or 0))
+            trend_expenses.append(int(exp_val or 0))
 
-    CAT_COLORS = {
-        "食費": "#68d391",
-        "外食費": "#f6ad55",
-        "日用品": "#63b3ed",
-        "趣味": "#e53e3e",
-        "自分磨き": "#3182ce",
-        "交際費": "#d69e2e",
-        "交通費": "#ed64a6",
-        "ガソリン": "#38a169",
-        "衣服": "#4c51bf",
-        "その他": "#a0aec0",
-    }
+        # 5. 当月のカテゴリ別支出内訳 & カラーパレット
+        category_rows = db.query(
+            """
+            SELECT category, COALESCE(SUM(amount), 0) as cat_total
+            FROM public.money_records
+            WHERE user_id = %s AND record_date::text LIKE %s AND record_type = 'expense'
+            GROUP BY category
+            ORDER BY cat_total DESC
+            """,
+            (USER_ID, f"{target_month}%")
+        )
 
-    cat_labels = []
-    cat_data = []
-    cat_colors = []
-    total_exp_month = summary["expenses"] or 1
+        CAT_COLORS = {
+            "食費": "#68d391",
+            "外食費": "#f6ad55",
+            "日用品": "#63b3ed",
+            "趣味": "#e53e3e",
+            "自分磨き": "#3182ce",
+            "交際費": "#d69e2e",
+            "交通費": "#ed64a6",
+            "ガソリン": "#38a169",
+            "衣服": "#4c51bf",
+            "その他": "#a0aec0",
+        }
 
-    category_list_html = ""
-    for r in category_rows:
-        c_name = r["category"]
-        c_amt = int(r["cat_total"])
-        cat_labels.append(c_name)
-        cat_data.append(c_amt)
-        color = CAT_COLORS.get(c_name, "#a0aec0")
-        cat_colors.append(color)
+        cat_labels = []
+        cat_data = []
+        cat_colors = []
+        total_exp_month = (summary.get("expenses") if isinstance(summary, dict) else 0) or 1
 
-        pct = round((c_amt / total_exp_month) * 100, 1)
-        category_list_html += f"""
-        <div class="cat-row">
-            <div class="cat-row-left">
-                <span class="cat-color-dot" style="background-color: {color};"></span>
-                <span class="cat-row-name">{c_name}</span>
-            </div>
-            <div class="cat-row-right">
-                <span class="cat-row-pct">{pct}%</span>
-                <span class="cat-row-amt">¥{c_amt:,}</span>
-            </div>
-        </div>
-        """
+        category_list_html = ""
+        for r in (category_rows or []):
+            c_name = str((r.get("category") if isinstance(r, dict) else r[0]) or "その他")
+            c_amt = int((r.get("cat_total") if isinstance(r, dict) else r[1]) or 0)
+            cat_labels.append(c_name)
+            cat_data.append(c_amt)
+            color = CAT_COLORS.get(c_name, "#a0aec0")
+            cat_colors.append(color)
 
-    # 6. 当月の取引レコード一覧
-    records = db.query(
-        """
-        SELECT * FROM public.money_records
-        WHERE user_id = %s AND record_date LIKE %s
-        ORDER BY record_date DESC, id DESC
-        """,
-        (USER_ID, f"{target_month}%")
-    )
-
-    records_html = ""
-    if not records:
-        records_html = '<div class="empty-state">この月の記録はまだありません</div>'
-    else:
-        for r in records:
-            is_income = r["record_type"] == "income"
-            sign = "+" if is_income else "-"
-            badge_class = "badge-income" if is_income else "badge-expense"
-            badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else r["category"])
-            detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
-            
-            records_html += f"""
-            <div class="record-card" id="rec-{r['id']}">
-                <div class="record-left">
-                    <span class="badge {badge_class}">{badge_text}</span>
-                    <span class="record-title">{r["title"]}</span>
-                    <div class="record-date">{r["record_date"]}</div>
-                    {detail_line}
+            pct = round((c_amt / total_exp_month) * 100, 1)
+            category_list_html += f"""
+            <div class="cat-row">
+                <div class="cat-row-left">
+                    <span class="cat-color-dot" style="background-color: {color};"></span>
+                    <span class="cat-row-name">{c_name}</span>
                 </div>
-                <div class="record-right">
-                    <div class="record-amount {'amount-income' if is_income else 'amount-expense'}">
-                        {sign}¥{r["amount"]:,}
-                    </div>
-                    <button class="delete-btn" onclick="deleteRecord({r['id']})" title="削除">✕</button>
+                <div class="cat-row-right">
+                    <span class="cat-row-pct">{pct}%</span>
+                    <span class="cat-row-amt">¥{c_amt:,}</span>
                 </div>
             </div>
             """
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="ja">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>家計簿 & シフト管理</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-            * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-            body {{ background-color: #f7f9fa; color: #2d3748; padding-bottom: 70px; }}
-            
-            .header {{ 
-                background: #1a202c; 
-                color: white; 
-                padding: 14px 20px; 
-                display: flex; 
-                justify-content: space-between; 
-                align-items: center; 
-                position: sticky; 
-                top: 0; 
-                z-index: 100; 
-                box-shadow: 0 2px 8px rgba(0,0,0,0.12); 
-            }}
-            .header h1 {{ font-size: 1.05rem; font-weight: 700; }}
-            .header-actions {{ display: flex; gap: 8px; }}
-            .btn-action {{
-                border: none;
-                padding: 7px 12px;
-                border-radius: 8px;
-                font-size: 0.8rem;
-                font-weight: 700;
-                cursor: pointer;
-                transition: transform 0.1s;
-            }}
-            .btn-action:active {{ transform: scale(0.95); }}
-            .btn-reload {{ background: #2d3748; color: #edf2f7; }}
-            .btn-add {{ background: #3182ce; color: white; }}
-
-            .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
-
-            /* 扶養状況カード */
-            .fuyou-card {{
-                background: white;
-                border-radius: 14px;
-                padding: 16px;
-                margin-bottom: 14px;
-                box-shadow: 0 2px 6px rgba(0,0,0,0.04);
-                border-left: 4px solid #3182ce;
-            }}
-            .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #2d3748; display: flex; justify-content: space-between; }}
-            .fuyou-meter-bg {{ background: #edf2f7; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
-            .fuyou-meter-bar {{ background: linear-gradient(90deg, #38a169, #dd6b20); height: 100%; border-radius: 5px; }}
-            .fuyou-desc {{ font-size: 0.78rem; color: #718096; display: flex; justify-content: space-between; }}
-
-            /* 通算残高 */
-            .all-time-card {{ background: linear-gradient(135deg, #2d3748, #1a202c); color: white; border-radius: 16px; padding: 16px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
-            .all-time-title {{ font-size: 0.75rem; color: #a0aec0; letter-spacing: 0.5px; margin-bottom: 4px; }}
-            .all-time-balance {{ font-size: 2rem; font-weight: 800; color: {'#63b3ed' if all_time_balance >= 0 else '#fc8181'}; }}
-            .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.82rem; }}
-            .all-time-grid span {{ color: #a0aec0; display: block; font-size: 0.72rem; }}
-
-            /* 月ナビゲーション */
-            .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }}
-            .month-nav a {{ text-decoration: none; color: #3182ce; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #ebf8ff; }}
-            .current-month {{ font-size: 1.15rem; font-weight: 800; color: #1a202c; }}
-
-            /* 当月カード */
-            .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
-            .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
-            .summary-main-label {{ font-size: 0.78rem; color: #718096; margin-bottom: 2px; }}
-            .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #38a169; }}
-            .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
-            .summary-sub-label {{ font-size: 0.75rem; color: #718096; }}
-            .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 2px; }}
-            .val-expense {{ color: #e53e3e; }}
-            .val-balance {{ color: #3182ce; }}
-
-            /* グラフカード */
-            .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
-            .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #2d3748; margin-bottom: 12px; }}
-
-            /* カテゴリ割合リスト */
-            .category-list {{ margin-top: 14px; border-top: 1px solid #edf2f7; padding-top: 10px; }}
-            .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f7fafc; }}
-            .cat-row:last-child {{ border-bottom: none; }}
-            .cat-row-left {{ display: flex; align-items: center; gap: 8px; }}
-            .cat-color-dot {{ width: 11px; height: 11px; border-radius: 50%; display: inline-block; }}
-            .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #2d3748; }}
-            .cat-row-right {{ display: flex; align-items: center; gap: 12px; }}
-            .cat-row-pct {{ font-size: 0.8rem; color: #718096; min-width: 42px; text-align: right; }}
-            .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; min-width: 75px; text-align: right; }}
-
-            /* 履歴一覧 */
-            .section-title {{ font-size: 0.92rem; font-weight: 700; color: #4a5568; margin: 18px 0 10px 4px; }}
-            .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }}
-            .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
-            .record-title {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; margin-left: 2px; }}
-            .record-date {{ font-size: 0.7rem; color: #a0aec0; }}
-            .record-detail {{ font-size: 0.72rem; color: #718096; }}
-            .badge {{ font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
-            .badge-income {{ background: #c6f6d5; color: #22543d; }}
-            .badge-expense {{ background: #fed7d7; color: #742a2a; }}
-            .record-right {{ display: flex; align-items: center; gap: 10px; }}
-            .record-amount {{ font-size: 1rem; font-weight: 800; white-space: nowrap; }}
-            .amount-income {{ color: #38a169; }}
-            .amount-expense {{ color: #e53e3e; }}
-            .delete-btn {{ background: none; border: none; color: #cbd5e0; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
-            .delete-btn:hover {{ color: #e53e3e; }}
-            .empty-state {{ text-align: center; padding: 24px; color: #a0aec0; font-size: 0.85rem; background: white; border-radius: 12px; }}
-
-            /* 手入力モーダル */
-            .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
-            .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
-            .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #1a202c; display: flex; justify-content: space-between; }}
-            .form-group {{ margin-bottom: 12px; }}
-            .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #718096; margin-bottom: 4px; }}
-            .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
-            .form-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-            .btn-submit {{ width: 100%; background: #3182ce; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
-            .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #a0aec0; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>家計簿 & シフト管理</h1>
-            <div class="header-actions">
-                <button class="btn-action btn-add" onclick="openModal()">➕ 手入力</button>
-                <button class="btn-action btn-reload" onclick="forceReload()">🔄</button>
-            </div>
-        </div>
-
-        <div class="container">
-            <!-- 2026年 扶養チェックメーター -->
-            <div class="fuyou-card">
-                <div class="fuyou-title">
-                    <span>📋 2026年 扶養管理（103万目安）</span>
-                    <strong style="color: {'#e53e3e' if rem_103 < 0 else '#2b6cb0'};">{pct_103}%</strong>
-                </div>
-                <div class="fuyou-meter-bg">
-                    <div class="fuyou-meter-bar" style="width: {pct_103}%;"></div>
-                </div>
-                <div class="fuyou-desc">
-                    <span>累計収入: ¥{ytd_income_2026:,}</span>
-                    <span>103万まで残り: <strong>¥{max(0, rem_103):,}</strong></span>
-                </div>
-            </div>
-
-            <!-- 全期間通算収支 -->
-            <div class="all-time-card">
-                <div class="all-time-title">💰 全期間の通算残高（総収支）</div>
-                <div class="all-time-balance">¥{all_time_balance:,}</div>
-                <div class="all-time-grid">
-                    <div>
-                        <span>通算総収入</span>
-                        <strong>+¥{all_time_income:,}</strong>
-                    </div>
-                    <div>
-                        <span>通算総支出</span>
-                        <strong style="color: #feb2b2;">-¥{all_time_expense:,}</strong>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 月別推移グラフ -->
-            <div class="chart-card">
-                <div class="chart-title">📊 月別 収支推移（収入 vs 支出）</div>
-                <canvas id="monthlyTrendChart" height="150"></canvas>
-            </div>
-
-            <!-- 月ナビゲーション -->
-            <div class="month-nav">
-                <a href="/?month={prev_month_str}">◀ 前月</a>
-                <div class="current-month">{year_str}年 {month_str}月</div>
-                <a href="/?month={next_month_str}">翌月 ▶</a>
-            </div>
-
-            <!-- 当月サマリーカード -->
-            <div class="summary-card">
-                <div class="summary-main">
-                    <div class="summary-main-label">{month_str}月 バイト給料（見込含む）</div>
-                    <div class="summary-main-val">¥{summary["total_income"]:,}</div>
-                </div>
-                <div class="summary-grid">
-                    <div>
-                        <div class="summary-sub-label">支出合計</div>
-                        <div class="summary-sub-val val-expense">¥{summary["expenses"]:,}</div>
-                    </div>
-                    <div>
-                        <div class="summary-sub-label">今月の差引残高</div>
-                        <div class="summary-sub-val val-balance">¥{summary["balance"]:,}</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- カテゴリ割合円グラフ & リスト -->
-            {f'''
+        category_card_html = ""
+        if cat_data:
+            category_card_html = f"""
             <div class="chart-card">
                 <div class="chart-title">🍩 {month_str}月 支出割合・内訳</div>
                 <div style="max-width: 260px; margin: 0 auto 12px auto;">
@@ -824,37 +602,312 @@ def dashboard(month: str | None = None):
                     {category_list_html}
                 </div>
             </div>
-            ''' if cat_data else ''}
+            """
 
-            <!-- 履歴一覧 -->
-            <div class="section-title">登録済みレコード一覧（{len(records)}件）</div>
-            {records_html}
-        </div>
+        # 6. 当月の取引レコード一覧
+        records = db.query(
+            """
+            SELECT * FROM public.money_records
+            WHERE user_id = %s AND record_date::text LIKE %s
+            ORDER BY record_date DESC, id DESC
+            """,
+            (USER_ID, f"{target_month}%")
+        )
 
-        <!-- 手入力モーダル -->
-        <div class="modal-overlay" id="manualModal">
-            <div class="modal-content">
-                <div class="modal-title">
-                    <span>収支を手動入力</span>
-                    <button class="btn-close" onclick="closeModal()">✕</button>
-                </div>
-                <form id="recordForm" onsubmit="submitManualRecord(event)">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="form-label">日付</label>
-                            <input type="date" class="form-control" id="f_date" value="{today_str}" required>
+        records_html = ""
+        if not records:
+            records_html = '<div class="empty-state">この月の記録はまだありません</div>'
+        else:
+            for r in records:
+                is_income = r["record_type"] == "income"
+                sign = "+" if is_income else "-"
+                badge_class = "badge-income" if is_income else "badge-expense"
+                badge_text = "見込給料" if (is_income and r["status"] == "expected") else ("収入" if is_income else r["category"])
+                detail_line = f'<div class="record-detail">{r["detail"]}</div>' if r["detail"] else ''
+                
+                records_html += f"""
+                <div class="record-card" id="rec-{r['id']}">
+                    <div class="record-left">
+                        <span class="badge {badge_class}">{badge_text}</span>
+                        <span class="record-title">{r["title"]}</span>
+                        <div class="record-date">{r["record_date"]}</div>
+                        {detail_line}
+                    </div>
+                    <div class="record-right">
+                        <div class="record-amount {'amount-income' if is_income else 'amount-expense'}">
+                            {sign}¥{r["amount"]:,}
                         </div>
-                        <div class="form-group">
-                            <label class="form-label">収支タイプ</label>
-                            <select class="form-control" id="f_type" onchange="toggleType()">
-                                <option value="expense">支出 (-)</option>
-                                <option value="income">収入 (+)</option>
-                            </select>
+                        <button class="delete-btn" onclick="deleteRecord({r['id']})" title="削除">✕</button>
+                    </div>
+                </div>
+                """
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        bal_color = "#63b3ed" if all_time_balance >= 0 else "#fc8181"
+        rem_color = "#e53e3e" if rem_103 < 0 else "#2b6cb0"
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <title>家計簿 & シフト管理</title>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            <style>
+                * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+                body {{ background-color: #f7f9fa; color: #2d3748; padding-bottom: 70px; }}
+                
+                .header {{ 
+                    background: #1a202c; 
+                    color: white; 
+                    padding: 14px 20px; 
+                    display: flex; 
+                    justify-content: space-between; 
+                    align-items: center; 
+                    position: sticky; 
+                    top: 0; 
+                    z-index: 100; 
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.12); 
+                }}
+                .header h1 {{ font-size: 1.05rem; font-weight: 700; }}
+                .header-actions {{ display: flex; gap: 8px; }}
+                .btn-action {{
+                    border: none;
+                    padding: 7px 12px;
+                    border-radius: 8px;
+                    font-size: 0.8rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                    transition: transform 0.1s;
+                }}
+                .btn-action:active {{ transform: scale(0.95); }}
+                .btn-reload {{ background: #2d3748; color: #edf2f7; }}
+                .btn-add {{ background: #3182ce; color: white; }}
+
+                .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
+
+                .fuyou-card {{
+                    background: white;
+                    border-radius: 14px;
+                    padding: 16px;
+                    margin-bottom: 14px;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+                    border-left: 4px solid #3182ce;
+                }}
+                .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #2d3748; display: flex; justify-content: space-between; }}
+                .fuyou-meter-bg {{ background: #edf2f7; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
+                .fuyou-meter-bar {{ background: linear-gradient(90deg, #38a169, #dd6b20); height: 100%; border-radius: 5px; }}
+                .fuyou-desc {{ font-size: 0.78rem; color: #718096; display: flex; justify-content: space-between; }}
+
+                .all-time-card {{ background: linear-gradient(135deg, #2d3748, #1a202c); color: white; border-radius: 16px; padding: 16px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
+                .all-time-title {{ font-size: 0.75rem; color: #a0aec0; letter-spacing: 0.5px; margin-bottom: 4px; }}
+                .all-time-balance {{ font-size: 2rem; font-weight: 800; color: {bal_color}; }}
+                .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.82rem; }}
+                .all-time-grid span {{ color: #a0aec0; display: block; font-size: 0.72rem; }}
+
+                .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }}
+                .month-nav a {{ text-decoration: none; color: #3182ce; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #ebf8ff; }}
+                .current-month {{ font-size: 1.15rem; font-weight: 800; color: #1a202c; }}
+
+                .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
+                .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
+                .summary-main-label {{ font-size: 0.78rem; color: #718096; margin-bottom: 2px; }}
+                .summary-main-val {{ font-size: 1.7rem; font-weight: 800; color: #38a169; }}
+                .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }}
+                .summary-sub-label {{ font-size: 0.75rem; color: #718096; }}
+                .summary-sub-val {{ font-size: 1.1rem; font-weight: 700; margin-top: 2px; }}
+                .val-expense {{ color: #e53e3e; }}
+                .val-balance {{ color: #3182ce; }}
+
+                .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
+                .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #2d3748; margin-bottom: 12px; }}
+
+                .category-list {{ margin-top: 14px; border-top: 1px solid #edf2f7; padding-top: 10px; }}
+                .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f7fafc; }}
+                .cat-row:last-child {{ border-bottom: none; }}
+                .cat-row-left {{ display: flex; align-items: center; gap: 8px; }}
+                .cat-color-dot {{ width: 11px; height: 11px; border-radius: 50%; display: inline-block; }}
+                .cat-row-name {{ font-size: 0.88rem; font-weight: 600; color: #2d3748; }}
+                .cat-row-right {{ display: flex; align-items: center; gap: 12px; }}
+                .cat-row-pct {{ font-size: 0.8rem; color: #718096; min-width: 42px; text-align: right; }}
+                .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; min-width: 75px; text-align: right; }}
+
+                .section-title {{ font-size: 0.92rem; font-weight: 700; color: #4a5568; margin: 18px 0 10px 4px; }}
+                .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }}
+                .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
+                .record-title {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; margin-left: 2px; }}
+                .record-date {{ font-size: 0.7rem; color: #a0aec0; }}
+                .record-detail {{ font-size: 0.72rem; color: #718096; }}
+                .badge {{ font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; }}
+                .badge-income {{ background: #c6f6d5; color: #22543d; }}
+                .badge-expense {{ background: #fed7d7; color: #742a2a; }}
+                .record-right {{ display: flex; align-items: center; gap: 10px; }}
+                .record-amount {{ font-size: 1rem; font-weight: 800; white-space: nowrap; }}
+                .amount-income {{ color: #38a169; }}
+                .amount-expense {{ color: #e53e3e; }}
+                .delete-btn {{ background: none; border: none; color: #cbd5e0; cursor: pointer; font-size: 0.85rem; padding: 4px; }}
+                .delete-btn:hover {{ color: #e53e3e; }}
+                .empty-state {{ text-align: center; padding: 24px; color: #a0aec0; font-size: 0.85rem; background: white; border-radius: 12px; }}
+
+                .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
+                .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
+                .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #1a202c; display: flex; justify-content: space-between; }}
+                .form-group {{ margin-bottom: 12px; }}
+                .form-label {{ display: block; font-size: 0.75rem; font-weight: 700; color: #718096; margin-bottom: 4px; }}
+                .form-control {{ width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.95rem; font-family: inherit; }}
+                .form-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+                .btn-submit {{ width: 100%; background: #3182ce; color: white; border: none; padding: 12px; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; margin-top: 10px; }}
+                .btn-close {{ background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #a0aec0; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>家計簿 & シフト管理</h1>
+                <div class="header-actions">
+                    <button class="btn-action btn-add" onclick="openModal()">➕ 手入力</button>
+                    <button class="btn-action btn-reload" onclick="forceReload()">🔄</button>
+                </div>
+            </div>
+
+            <div class="container">
+                <div class="fuyou-card">
+                    <div class="fuyou-title">
+                        <span>📋 2026年 扶養管理（103万目安）</span>
+                        <strong style="color: {rem_color};">{pct_103}%</strong>
+                    </div>
+                    <div class="fuyou-meter-bg">
+                        <div class="fuyou-meter-bar" style="width: {pct_103}%;"></div>
+                    </div>
+                    <div class="fuyou-desc">
+                        <span>累計収入: ¥{ytd_income_2026:,}</span>
+                        <span>103万まで残り: <strong>¥{max(0, rem_103):,}</strong></span>
+                    </div>
+                </div>
+
+                <div class="all-time-card">
+                    <div class="all-time-title">💰 全期間の通算残高（総収支）</div>
+                    <div class="all-time-balance">¥{all_time_balance:,}</div>
+                    <div class="all-time-grid">
+                        <div>
+                            <span>通算総収入</span>
+                            <strong>+¥{all_time_income:,}</strong>
+                        </div>
+                        <div>
+                            <span>通算総支出</span>
+                            <strong style="color: #feb2b2;">-¥{all_time_expense:,}</strong>
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">カテゴリ</label>
-                        <select class="form-control" id="f_category">
+                </div>
+
+                <div class="chart-card">
+                    <div class="chart-title">📊 月別 収支推移（収入 vs 支出）</div>
+                    <canvas id="monthlyTrendChart" height="150"></canvas>
+                </div>
+
+                <div class="month-nav">
+                    <a href="/?month={prev_month_str}">◀ 前月</a>
+                    <div class="current-month">{year_str}年 {month_str}月</div>
+                    <a href="/?month={next_month_str}">翌月 ▶</a>
+                </div>
+
+                <div class="summary-card">
+                    <div class="summary-main">
+                        <div class="summary-main-label">{month_str}月 バイト給料（見込含む）</div>
+                        <div class="summary-main-val">¥{summary.get("total_income", 0):,}</div>
+                    </div>
+                    <div class="summary-grid">
+                        <div>
+                            <div class="summary-sub-label">支出合計</div>
+                            <div class="summary-sub-val val-expense">¥{summary.get("expenses", 0):,}</div>
+                        </div>
+                        <div>
+                            <div class="summary-sub-label">今月の差引残高</div>
+                            <div class="summary-sub-val val-balance">¥{summary.get("balance", 0):,}</div>
+                        </div>
+                    </div>
+                </div>
+
+                {category_card_html}
+
+                <div class="section-title">登録済みレコード一覧（{len(records or [])}件）</div>
+                {records_html}
+            </div>
+
+            <div class="modal-overlay" id="manualModal">
+                <div class="modal-content">
+                    <div class="modal-title">
+                        <span>収支を手動入力</span>
+                        <button class="btn-close" onclick="closeModal()">✕</button>
+                    </div>
+                    <form id="recordForm" onsubmit="submitManualRecord(event)">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">日付</label>
+                                <input type="date" class="form-control" id="f_date" value="{today_str}" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">収支タイプ</label>
+                                <select class="form-control" id="f_type" onchange="toggleType()">
+                                    <option value="expense">支出 (-)</option>
+                                    <option value="income">収入 (+)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">カテゴリ</label>
+                            <select class="form-control" id="f_category">
+                                <option value="食費">食費</option>
+                                <option value="外食費">外食費</option>
+                                <option value="日用品">日用品</option>
+                                <option value="趣味">趣味</option>
+                                <option value="自分磨き">自分磨き</option>
+                                <option value="交際費">交際費</option>
+                                <option value="交通費">交通費</option>
+                                <option value="ガソリン">ガソリン</option>
+                                <option value="衣服">衣服</option>
+                                <option value="その他">その他</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">店名・項目名</label>
+                            <input type="text" class="form-control" id="f_title" placeholder="例: セブン-イレブン、給料など" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">金額（円）</label>
+                            <input type="number" class="form-control" id="f_amount" placeholder="例: 1500" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">メモ・詳細（任意）</label>
+                            <input type="text" class="form-control" id="f_detail" placeholder="例: 友達とお茶">
+                        </div>
+                        <button type="submit" class="btn-submit">登録する</button>
+                    </form>
+                </div>
+            </div>
+
+            <script>
+                function forceReload() {{
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('_t', Date.now());
+                    window.location.href = url.toString();
+                }}
+
+                function openModal() {{
+                    document.getElementById('manualModal').style.display = 'flex';
+                }}
+
+                function closeModal() {{
+                    document.getElementById('manualModal').style.display = 'none';
+                }}
+
+                function toggleType() {{
+                    const t = document.getElementById('f_type').value;
+                    const cat = document.getElementById('f_category');
+                    if (t === 'income') {{
+                        cat.innerHTML = '<option value="給料">給料</option><option value="バイト">バイト</option><option value="臨時収入">臨時収入</option><option value="その他">その他</option>';
+                    }} else {{
+                        cat.innerHTML = `
                             <option value="食費">食費</option>
                             <option value="外食費">外食費</option>
                             <option value="日用品">日用品</option>
@@ -865,166 +918,125 @@ def dashboard(month: str | None = None):
                             <option value="ガソリン">ガソリン</option>
                             <option value="衣服">衣服</option>
                             <option value="その他">その他</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">店名・項目名</label>
-                        <input type="text" class="form-control" id="f_title" placeholder="例: セブン-イレブン、給料など" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">金額（円）</label>
-                        <input type="number" class="form-control" id="f_amount" placeholder="例: 1500" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">メモ・詳細（任意）</label>
-                        <input type="text" class="form-control" id="f_detail" placeholder="例: 友達とお茶">
-                    </div>
-                    <button type="submit" class="btn-submit">登録する</button>
-                </form>
-            </div>
-        </div>
-
-        <script>
-            function forceReload() {{
-                const url = new URL(window.location.href);
-                url.searchParams.set('_t', Date.now());
-                window.location.href = url.toString();
-            }}
-
-            function openModal() {{
-                document.getElementById('manualModal').style.display = 'flex';
-            }}
-
-            function closeModal() {{
-                document.getElementById('manualModal').style.display = 'none';
-            }}
-
-            function toggleType() {{
-                const t = document.getElementById('f_type').value;
-                const cat = document.getElementById('f_category');
-                if (t === 'income') {{
-                    cat.innerHTML = '<option value="給料">給料</option><option value="バイト">バイト</option><option value="臨時収入">臨時収入</option><option value="その他">その他</option>';
-                }} else {{
-                    cat.innerHTML = `
-                        <option value="食費">食費</option>
-                        <option value="外食費">外食費</option>
-                        <option value="日用品">日用品</option>
-                        <option value="趣味">趣味</option>
-                        <option value="自分磨き">自分磨き</option>
-                        <option value="交際費">交際費</option>
-                        <option value="交通費">交通費</option>
-                        <option value="ガソリン">ガソリン</option>
-                        <option value="衣服">衣服</option>
-                        <option value="その他">その他</option>
-                    `;
-                }}
-            }}
-
-            async function submitManualRecord(e) {{
-                e.preventDefault();
-                const payload = {{
-                    record_date: document.getElementById('f_date').value,
-                    record_type: document.getElementById('f_type').value,
-                    category: document.getElementById('f_category').value,
-                    title: document.getElementById('f_title').value,
-                    amount: parseInt(document.getElementById('f_amount').value),
-                    detail: document.getElementById('f_detail').value
-                }};
-
-                try {{
-                    const res = await fetch('/api/records', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify(payload)
-                    }});
-                    if (res.ok) {{
-                        const ym = payload.record_date.substring(0, 7);
-                        window.location.href = '/?month=' + ym + '&_t=' + Date.now();
-                    }} else {{
-                        alert('登録に失敗しました💦');
+                        `;
                     }}
-                }} catch (err) {{
-                    alert('通信エラー: ' + err);
                 }}
-            }}
 
-            async function deleteRecord(id) {{
-                if (!confirm('この明細を削除してもよろしいですか？')) return;
-                try {{
-                    const res = await fetch('/api/records/' + id, {{ method: 'DELETE' }});
-                    if (res.ok) {{
-                        const el = document.getElementById('rec-' + id);
-                        if (el) el.remove();
-                        forceReload();
-                    }} else {{
-                        alert('削除に失敗しました💦');
-                    }}
-                }} catch (err) {{
-                    alert('通信エラー: ' + err);
-                }}
-            }}
+                async function submitManualRecord(e) {{
+                    e.preventDefault();
+                    const payload = {{
+                        record_date: document.getElementById('f_date').value,
+                        record_type: document.getElementById('f_type').value,
+                        category: document.getElementById('f_category').value,
+                        title: document.getElementById('f_title').value,
+                        amount: parseInt(document.getElementById('f_amount').value),
+                        detail: document.getElementById('f_detail').value
+                    }};
 
-            const trendCtx = document.getElementById('monthlyTrendChart').getContext('2d');
-            new Chart(trendCtx, {{
-                type: 'bar',
-                data: {{
-                    labels: {json.dumps(trend_labels)},
-                    datasets: [
-                        {{
-                            label: '収入',
-                            data: {json.dumps(trend_incomes)},
-                            backgroundColor: '#38a169',
-                            borderRadius: 4
-                        }},
-                        {{
-                            label: '支出',
-                            data: {json.dumps(trend_expenses)},
-                            backgroundColor: '#e53e3e',
-                            borderRadius: 4
+                    try {{
+                        const res = await fetch('/api/records', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify(payload)
+                        }});
+                        if (res.ok) {{
+                            const ym = payload.record_date.substring(0, 7);
+                            window.location.href = '/?month=' + ym + '&_t=' + Date.now();
+                        }} else {{
+                            alert('登録に失敗しました💦');
                         }}
-                    ]
-                }},
-                options: {{
-                    responsive: true,
-                    plugins: {{
-                        legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }}
-                    }},
-                    scales: {{
-                        y: {{
-                            beginAtZero: true,
-                            ticks: {{ callback: function(val) {{ return '¥' + val.toLocaleString(); }} }}
-                        }}
+                    }} catch (err) {{
+                        alert('通信エラー: ' + err);
                     }}
                 }}
-            }});
 
-            const catCanvas = document.getElementById('categoryChart');
-            if (catCanvas) {{
-                new Chart(catCanvas.getContext('2d'), {{
-                    type: 'doughnut',
+                async function deleteRecord(id) {{
+                    if (!confirm('この明細を削除してもよろしいですか？')) return;
+                    try {{
+                        const res = await fetch('/api/records/' + id, {{ method: 'DELETE' }});
+                        if (res.ok) {{
+                            const el = document.getElementById('rec-' + id);
+                            if (el) el.remove();
+                            forceReload();
+                        }} else {{
+                            alert('削除に失敗しました💦');
+                        }}
+                    }} catch (err) {{
+                        alert('通信エラー: ' + err);
+                    }}
+                }}
+
+                const trendCtx = document.getElementById('monthlyTrendChart').getContext('2d');
+                new Chart(trendCtx, {{
+                    type: 'bar',
                     data: {{
-                        labels: {json.dumps(cat_labels)},
-                        datasets: [{{
-                            data: {json.dumps(cat_data)},
-                            backgroundColor: {json.dumps(cat_colors)},
-                            borderWidth: 2,
-                            borderColor: '#ffffff'
-                        }}]
+                        labels: {json.dumps(trend_labels)},
+                        datasets: [
+                            {{
+                                label: '収入',
+                                data: {json.dumps(trend_incomes)},
+                                backgroundColor: '#38a169',
+                                borderRadius: 4
+                            }},
+                            {{
+                                label: '支出',
+                                data: {json.dumps(trend_expenses)},
+                                backgroundColor: '#e53e3e',
+                                borderRadius: 4
+                            }}
+                        ]
                     }},
                     options: {{
                         responsive: true,
-                        cutout: '58%',
                         plugins: {{
-                            legend: {{ display: false }}
+                            legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }}
+                        }},
+                        scales: {{
+                            y: {{
+                                beginAtZero: true,
+                                ticks: {{ callback: function(val) {{ return '¥' + val.toLocaleString(); }} }}
+                            }}
                         }}
                     }}
                 }});
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    return html_content
+
+                const catCanvas = document.getElementById('categoryChart');
+                if (catCanvas) {{
+                    new Chart(catCanvas.getContext('2d'), {{
+                        type: 'doughnut',
+                        data: {{
+                            labels: {json.dumps(cat_labels)},
+                            datasets: [{{
+                                data: {json.dumps(cat_data)},
+                                backgroundColor: {json.dumps(cat_colors)},
+                                borderWidth: 2,
+                                borderColor: '#ffffff'
+                            }}]
+                        }},
+                        options: {{
+                            responsive: true,
+                            cutout: '58%',
+                            plugins: {{
+                                legend: {{ display: false }}
+                            }}
+                        }}
+                    }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
+        return html_content
+    except Exception as e:
+        err_msg = traceback.format_exc()
+        return HTMLResponse(f"""
+        <html>
+        <body style="font-family: sans-serif; padding: 20px; background: #fff5f5;">
+            <h2 style="color: #c53030;">画面生成エラー</h2>
+            <pre style="background: white; padding: 15px; border-radius: 8px; border: 1px solid #feb2b2; overflow: auto;">{err_msg}</pre>
+        </body>
+        </html>
+        """, status_code=500)
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -1089,7 +1101,7 @@ def handle_text_message(event):
                 existing = db.query(
                     """
                     SELECT id FROM public.money_records 
-                    WHERE user_id = %s AND record_date = %s AND title = %s AND amount = %s AND record_type = 'expense'
+                    WHERE user_id = %s AND record_date::text = %s AND title = %s AND amount = %s AND record_type = 'expense'
                     LIMIT 1
                     """,
                     (USER_ID, parsed_exp["record_date"], parsed_exp["title"], parsed_exp["amount"])
@@ -1191,7 +1203,7 @@ def handle_image_message(event):
                 existing = db.query(
                     """
                     SELECT id FROM public.money_records 
-                    WHERE user_id = %s AND record_date = %s AND title = %s AND amount = %s AND record_type = 'expense'
+                    WHERE user_id = %s AND record_date::text = %s AND title = %s AND amount = %s AND record_type = 'expense'
                     LIMIT 1
                     """,
                     (USER_ID, rec_date, store, amount)
