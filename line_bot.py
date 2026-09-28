@@ -49,130 +49,129 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # -------------------------------------------------------------
-# 過去アプリのデータ完全同期（2025年7月〜2026年8月）
+# 過去アプリの収支データ完全同期（支出 & 収入）
 # -------------------------------------------------------------
 def sync_past_app_data():
     past_records = [
-        # 2025-07 (合計: 80,628円)
-        ("2025-07-31", "食費", "食費", 33988),
-        ("2025-07-31", "日用品", "日用品", 880),
-        ("2025-07-31", "交通費", "交通費", 3100),
-        ("2025-07-31", "衣服", "衣服", 4200),
-        ("2025-07-31", "趣味", "趣味", 37900),
-        ("2025-07-31", "その他", "その他", 560),
+        # --- 2025年 支出 ---
+        ("2025-07-31", "expense", "食費", "食費", 33988),
+        ("2025-07-31", "expense", "日用品", "日用品", 880),
+        ("2025-07-31", "expense", "交通費", "交通費", 3100),
+        ("2025-07-31", "expense", "衣服", "衣服", 4200),
+        ("2025-07-31", "expense", "趣味", "趣味", 37900),
+        ("2025-07-31", "expense", "その他", "その他", 560),
 
-        # 2025-08 (合計: 206,971円)
-        ("2025-08-31", "食費", "食費", 47474),
-        ("2025-08-31", "日用品", "日用品", 3077),
-        ("2025-08-31", "交通費", "交通費", 2800),
-        ("2025-08-31", "交際費", "交際費", 6080),
-        ("2025-08-31", "趣味", "趣味", 144656),
-        ("2025-08-31", "その他", "その他", 2884),
+        ("2025-08-31", "expense", "食費", "食費", 47474),
+        ("2025-08-31", "expense", "日用品", "日用品", 3077),
+        ("2025-08-31", "expense", "交通費", "交通費", 2800),
+        ("2025-08-31", "expense", "交際費", "交際費", 6080),
+        ("2025-08-31", "expense", "趣味", "趣味", 144656),
+        ("2025-08-31", "expense", "その他", "その他", 2884),
 
-        # 2025-09 (合計: 135,087円)
-        ("2025-09-30", "食費", "食費", 27374),
-        ("2025-09-30", "外食費", "外食費", 3834),
-        ("2025-09-30", "日用品", "日用品", 12800),
-        ("2025-09-30", "趣味", "趣味", 90679),
-        ("2025-09-30", "自分磨き", "自分磨き", 400),
+        ("2025-09-30", "expense", "食費", "食費", 27374),
+        ("2025-09-30", "expense", "外食費", "外食費", 3834),
+        ("2025-09-30", "expense", "日用品", "日用品", 12800),
+        ("2025-09-30", "expense", "趣味", "趣味", 90679),
+        ("2025-09-30", "expense", "自分磨き", "自分磨き", 400),
 
-        # 2025-10 (合計: 204,994円)
-        ("2025-10-31", "食費", "食費", 14201),
-        ("2025-10-31", "日用品", "日用品", 12777),
-        ("2025-10-31", "趣味", "趣味", 34438),
-        ("2025-10-31", "自分磨き", "自分磨き", 102387),
-        ("2025-10-31", "その他", "その他", 41191),
+        ("2025-10-31", "expense", "食費", "食費", 14201),
+        ("2025-10-31", "expense", "日用品", "日用品", 12777),
+        ("2025-10-31", "expense", "趣味", "趣味", 34438),
+        ("2025-10-31", "expense", "自分磨き", "自分磨き", 102387),
+        ("2025-10-31", "expense", "その他", "その他", 41191),
 
-        # 2025-11 (合計: 193,622円)
-        ("2025-11-30", "食費", "食費", 10010),
-        ("2025-11-30", "日用品", "日用品", 21950),
-        ("2025-11-30", "交際費", "交際費", 570),
-        ("2025-11-30", "趣味", "趣味", 55694),
-        ("2025-11-30", "自分磨き", "自分磨き", 55398),
-        ("2025-11-30", "その他", "その他", 50000),
+        ("2025-11-30", "expense", "食費", "食費", 10010),
+        ("2025-11-30", "expense", "日用品", "日用品", 21950),
+        ("2025-11-30", "expense", "交際費", "交際費", 570),
+        ("2025-11-30", "expense", "趣味", "趣味", 55694),
+        ("2025-11-30", "expense", "自分磨き", "自分磨き", 55398),
+        ("2025-11-30", "expense", "その他", "その他", 50000),
 
-        # 2025-12 (合計: 121,281円)
-        ("2025-12-31", "食費", "食費", 6799),
-        ("2025-12-31", "日用品", "日用品", 1288),
-        ("2025-12-31", "交際費", "交際費", 4310),
-        ("2025-12-31", "趣味", "趣味", 28093),
-        ("2025-12-31", "自分磨き", "自分磨き", 80791),
+        ("2025-12-31", "expense", "食費", "食費", 6799),
+        ("2025-12-31", "expense", "日用品", "日用品", 1288),
+        ("2025-12-31", "expense", "交際費", "交際費", 4310),
+        ("2025-12-31", "expense", "趣味", "趣味", 28093),
+        ("2025-12-31", "expense", "自分磨き", "自分磨き", 80791),
 
-        # 2026-01 (合計: 193,327円)
-        ("2026-01-31", "食費", "食費", 63458),
-        ("2026-01-31", "日用品", "日用品", 6229),
-        ("2026-01-31", "趣味", "趣味", 122890),
-        ("2026-01-31", "その他", "その他", 750),
+        # --- 2026年 支出 ---
+        ("2026-01-31", "expense", "食費", "食費", 63458),
+        ("2026-01-31", "expense", "日用品", "日用品", 6229),
+        ("2026-01-31", "expense", "趣味", "趣味", 122890),
+        ("2026-01-31", "expense", "その他", "その他", 750),
 
-        # 2026-02 (合計: 90,597円)
-        ("2026-02-28", "食費", "食費", 14517),
-        ("2026-02-28", "外食費", "外食費", 1419),
-        ("2026-02-28", "日用品", "日用品", 6328),
-        ("2026-02-28", "交際費", "交際費", 2234),
-        ("2026-02-28", "趣味", "趣味", 34789),
-        ("2026-02-28", "自分磨き", "自分磨き", 30800),
-        ("2026-02-28", "その他", "その他", 510),
+        ("2026-02-28", "expense", "食費", "食費", 14517),
+        ("2026-02-28", "expense", "外食費", "外食費", 1419),
+        ("2026-02-28", "expense", "日用品", "日用品", 6328),
+        ("2026-02-28", "expense", "交際費", "交際費", 2234),
+        ("2026-02-28", "expense", "趣味", "趣味", 34789),
+        ("2026-02-28", "expense", "自分磨き", "自分磨き", 30800),
+        ("2026-02-28", "expense", "その他", "その他", 510),
 
-        # 2026-03 (合計: 118,150円)
-        ("2026-03-31", "食費", "食費", 19161),
-        ("2026-03-31", "日用品", "日用品", 7574),
-        ("2026-03-31", "交際費", "交際費", 10650),
-        ("2026-03-31", "趣味", "趣味", 71000),
-        ("2026-03-31", "その他", "その他", 9765),
+        ("2026-03-31", "expense", "食費", "食費", 19161),
+        ("2026-03-31", "expense", "日用品", "日用品", 7574),
+        ("2026-03-31", "expense", "交際費", "交際費", 10650),
+        ("2026-03-31", "expense", "趣味", "趣味", 71000),
+        ("2026-03-31", "expense", "その他", "その他", 9765),
 
-        # 2026-04 (合計: 80,219円)
-        ("2026-04-30", "食費", "食費", 17317),
-        ("2026-04-30", "日用品", "日用品", 8999),
-        ("2026-04-30", "趣味", "趣味", 2500),
-        ("2026-04-30", "自分磨き", "自分磨き", 34920),
-        ("2026-04-30", "その他", "その他", 16483),
+        ("2026-04-30", "expense", "食費", "食費", 17317),
+        ("2026-04-30", "expense", "日用品", "日用品", 8999),
+        ("2026-04-30", "expense", "趣味", "趣味", 2500),
+        ("2026-04-30", "expense", "自分磨き", "自分磨き", 34920),
+        ("2026-04-30", "expense", "その他", "その他", 16483),
 
-        # 2026-05 (合計: 129,592円)
-        ("2026-05-31", "食費", "食費", 27075),
-        ("2026-05-31", "日用品", "日用品", 15019),
-        ("2026-05-31", "交通費", "交通費", 3100),
-        ("2026-05-31", "交際費", "交際費", 3168),
-        ("2026-05-31", "趣味", "趣味", 41748),
-        ("2026-05-31", "自分磨き", "自分磨き", 24902),
-        ("2026-05-31", "その他", "その他", 14580),
+        ("2026-05-31", "expense", "食費", "食費", 27075),
+        ("2026-05-31", "expense", "日用品", "日用品", 15019),
+        ("2026-05-31", "expense", "交通費", "交通費", 3100),
+        ("2026-05-31", "expense", "交際費", "交際費", 3168),
+        ("2026-05-31", "expense", "趣味", "趣味", 41748),
+        ("2026-05-31", "expense", "自分磨き", "自分磨き", 24902),
+        ("2026-05-31", "expense", "その他", "その他", 14580),
 
-        # 2026-06 (合計: 170,127円)
-        ("2026-06-30", "食費", "食費", 27098),
-        ("2026-06-30", "日用品", "日用品", 19159),
-        ("2026-06-30", "交際費", "交際費", 34590),
-        ("2026-06-30", "趣味", "趣味", 3030),
-        ("2026-06-30", "自分磨き", "自分磨き", 79780),
-        ("2026-06-30", "ガソリン", "ガソリン", 3500),
-        ("2026-06-30", "その他", "その他", 2970),
+        ("2026-06-30", "expense", "食費", "食費", 27098),
+        ("2026-06-30", "expense", "日用品", "日用品", 19159),
+        ("2026-06-30", "expense", "交際費", "交際費", 34590),
+        ("2026-06-30", "expense", "趣味", "趣味", 3030),
+        ("2026-06-30", "expense", "自分磨き", "自分磨き", 79780),
+        ("2026-06-30", "expense", "ガソリン", "ガソリン", 3500),
+        ("2026-06-30", "expense", "その他", "その他", 2970),
 
-        # 2026-07 (合計: 106,595円)
-        ("2026-07-31", "食費", "食費", 33401),
-        ("2026-07-31", "日用品", "日用品", 12000),
-        ("2026-07-31", "交際費", "交際費", 7925),
-        ("2026-07-31", "趣味", "趣味 (Amazon含む)", 14391),
-        ("2026-07-31", "自分磨き", "自分磨き", 34078),
-        ("2026-07-31", "ガソリン", "ガソリン", 4800),
+        ("2026-07-31", "expense", "食費", "食費", 33401),
+        ("2026-07-31", "expense", "日用品", "日用品", 12000),
+        ("2026-07-31", "expense", "交際費", "交際費", 7925),
+        ("2026-07-31", "expense", "趣味", "趣味 (Amazon含む)", 14391),
+        ("2026-07-31", "expense", "自分磨き", "自分磨き", 34078),
+        ("2026-07-31", "expense", "ガソリン", "ガソリン", 4800),
 
-        # 2026-08 (合計: 111,968円)
-        ("2026-08-31", "食費", "食費", 22352),
-        ("2026-08-31", "日用品", "日用品", 13028),
-        ("2026-08-31", "交際費", "交際費", 3276),
-        ("2026-08-31", "趣味", "趣味", 69119),
-        ("2026-08-31", "ガソリン", "ガソリン", 4033),
-        ("2026-08-31", "その他", "その他", 160),
+        ("2026-08-31", "expense", "食費", "食費", 22352),
+        ("2026-08-31", "expense", "日用品", "日用品", 13028),
+        ("2026-08-31", "expense", "交際費", "交際費", 3276),
+        ("2026-08-31", "expense", "趣味", "趣味", 69119),
+        ("2026-08-31", "expense", "ガソリン", "ガソリン", 4033),
+        ("2026-08-31", "expense", "その他", "その他", 160),
+
+        # --- 過去 収入データ ---
+        ("2025-07-31", "income", "給料", "給料まとめ", 102419),
+        ("2025-08-31", "income", "給料", "給料まとめ", 236937),
+        ("2026-01-31", "income", "給料", "給料まとめ", 52313),
+        ("2026-02-28", "income", "給料", "給料まとめ", 94947),
+        ("2026-03-31", "income", "給料", "給料まとめ", 119087),
+        ("2026-04-30", "income", "給料", "給料まとめ", 60557),
+        ("2026-05-31", "income", "給料", "給料まとめ", 147402),
+        ("2026-06-30", "income", "給料", "給料まとめ", 170708),
+        ("2026-07-31", "income", "給料", "給料まとめ", 78204),
+        ("2026-08-31", "income", "給料", "給料まとめ", 117308),
     ]
 
-    # 古い過去引き継ぎレコードを安全に一掃して完全再同期
     db.query(
         "DELETE FROM public.money_records WHERE user_id = %s AND detail = '過去アプリより引き継ぎ'",
         (USER_ID,)
     )
 
-    for rec_date, cat, title, amt in past_records:
+    for rec_date, r_type, cat, title, amt in past_records:
         try:
             db.insert_money_record(
                 record_date=rec_date,
-                record_type="expense",
+                record_type=r_type,
                 category=cat,
                 title=title,
                 amount=amt,
@@ -181,12 +180,12 @@ def sync_past_app_data():
                 user_id=USER_ID
             )
         except Exception as e:
-            print(f"Past import error: {e}")
+            print(f"Past sync error: {e}")
 
 try:
     sync_past_app_data()
 except Exception as e:
-    print(f"Past data sync error: {e}")
+    print(f"Past data sync call error: {e}")
 
 def get_calendar_service():
     if not os.path.exists(CREDENTIALS_PATH):
@@ -493,7 +492,21 @@ def dashboard(month: str | None = None):
             all_time_expense = int(row["total"])
     all_time_balance = all_time_income - all_time_expense
 
-    # 3. 月別推移（直近15ヶ月分）
+    # 3. 2026年の年間累計収入（扶養チェック用）
+    income_2026_rows = db.query(
+        """
+        SELECT COALESCE(SUM(amount), 0) as total
+        FROM public.money_records
+        WHERE user_id = %s AND record_type = 'income' AND record_date LIKE '2026%'
+        """,
+        (USER_ID,)
+    )
+    ytd_income_2026 = int(income_2026_rows[0]["total"]) if income_2026_rows else 0
+    limit_103 = 1030000
+    rem_103 = limit_103 - ytd_income_2026
+    pct_103 = min(100, round((ytd_income_2026 / limit_103) * 100, 1))
+
+    # 4. 月別推移（直近15ヶ月分）
     monthly_trends = db.query(
         """
         SELECT 
@@ -512,7 +525,7 @@ def dashboard(month: str | None = None):
     trend_incomes = [int(r["inc"]) for r in monthly_trends]
     trend_expenses = [int(r["exp"]) for r in monthly_trends]
 
-    # 4. 当月のカテゴリ別支出内訳 & カラーパレット
+    # 5. 当月のカテゴリ別支出内訳 & カラーパレット
     category_rows = db.query(
         """
         SELECT category, COALESCE(SUM(amount), 0) as cat_total
@@ -565,7 +578,7 @@ def dashboard(month: str | None = None):
         </div>
         """
 
-    # 5. 当月の取引レコード一覧
+    # 6. 当月の取引レコード一覧
     records = db.query(
         """
         SELECT * FROM public.money_records
@@ -646,16 +659,33 @@ def dashboard(month: str | None = None):
 
             .container {{ max-width: 550px; margin: 0 auto; padding: 14px; }}
 
+            /* 扶養状況カード */
+            .fuyou-card {{
+                background: white;
+                border-radius: 14px;
+                padding: 16px;
+                margin-bottom: 14px;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+                border-left: 4px solid #3182ce;
+            }}
+            .fuyou-title {{ font-size: 0.85rem; font-weight: 700; color: #2d3748; display: flex; justify-content: space-between; }}
+            .fuyou-meter-bg {{ background: #edf2f7; height: 10px; border-radius: 5px; margin: 10px 0 8px 0; overflow: hidden; }}
+            .fuyou-meter-bar {{ background: linear-gradient(90deg, #38a169, #dd6b20); height: 100%; border-radius: 5px; }}
+            .fuyou-desc {{ font-size: 0.78rem; color: #718096; display: flex; justify-content: space-between; }}
+
+            /* 通算残高 */
             .all-time-card {{ background: linear-gradient(135deg, #2d3748, #1a202c); color: white; border-radius: 16px; padding: 16px 20px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }}
             .all-time-title {{ font-size: 0.75rem; color: #a0aec0; letter-spacing: 0.5px; margin-bottom: 4px; }}
             .all-time-balance {{ font-size: 2rem; font-weight: 800; color: {'#63b3ed' if all_time_balance >= 0 else '#fc8181'}; }}
             .all-time-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.82rem; }}
             .all-time-grid span {{ color: #a0aec0; display: block; font-size: 0.72rem; }}
 
+            /* 月ナビゲーション */
             .month-nav {{ display: flex; justify-content: space-between; align-items: center; background: white; padding: 12px 18px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }}
             .month-nav a {{ text-decoration: none; color: #3182ce; font-size: 0.88rem; font-weight: 700; padding: 6px 14px; border-radius: 8px; background: #ebf8ff; }}
             .current-month {{ font-size: 1.15rem; font-weight: 800; color: #1a202c; }}
 
+            /* 当月カード */
             .summary-card {{ background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); margin-bottom: 14px; }}
             .summary-main {{ text-align: center; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed #e2e8f0; }}
             .summary-main-label {{ font-size: 0.78rem; color: #718096; margin-bottom: 2px; }}
@@ -666,9 +696,11 @@ def dashboard(month: str | None = None):
             .val-expense {{ color: #e53e3e; }}
             .val-balance {{ color: #3182ce; }}
 
+            /* グラフカード */
             .chart-card {{ background: white; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }}
             .chart-title {{ font-size: 0.9rem; font-weight: 700; color: #2d3748; margin-bottom: 12px; }}
 
+            /* カテゴリ割合リスト */
             .category-list {{ margin-top: 14px; border-top: 1px solid #edf2f7; padding-top: 10px; }}
             .cat-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 4px; border-bottom: 1px solid #f7fafc; }}
             .cat-row:last-child {{ border-bottom: none; }}
@@ -679,6 +711,7 @@ def dashboard(month: str | None = None):
             .cat-row-pct {{ font-size: 0.8rem; color: #718096; min-width: 42px; text-align: right; }}
             .cat-row-amt {{ font-size: 0.92rem; font-weight: 700; color: #1a202c; min-width: 75px; text-align: right; }}
 
+            /* 履歴一覧 */
             .section-title {{ font-size: 0.92rem; font-weight: 700; color: #4a5568; margin: 18px 0 10px 4px; }}
             .record-card {{ background: white; border-radius: 12px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }}
             .record-left {{ display: flex; flex-direction: column; gap: 2px; }}
@@ -696,6 +729,7 @@ def dashboard(month: str | None = None):
             .delete-btn:hover {{ color: #e53e3e; }}
             .empty-state {{ text-align: center; padding: 24px; color: #a0aec0; font-size: 0.85rem; background: white; border-radius: 12px; }}
 
+            /* 手入力モーダル */
             .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 200; justify-content: center; align-items: center; padding: 16px; }}
             .modal-content {{ background: white; border-radius: 16px; padding: 22px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }}
             .modal-title {{ font-size: 1.1rem; font-weight: 700; margin-bottom: 14px; color: #1a202c; display: flex; justify-content: space-between; }}
@@ -717,6 +751,22 @@ def dashboard(month: str | None = None):
         </div>
 
         <div class="container">
+            <!-- 2026年 扶養チェックメーター -->
+            <div class="fuyou-card">
+                <div class="fuyou-title">
+                    <span>📋 2026年 扶養管理（103万目安）</span>
+                    <strong style="color: {'#e53e3e' if rem_103 < 0 else '#2b6cb0'};">{pct_103}%</strong>
+                </div>
+                <div class="fuyou-meter-bg">
+                    <div class="fuyou-meter-bar" style="width: {pct_103}%;"></div>
+                </div>
+                <div class="fuyou-desc">
+                    <span>累計収入: ¥{ytd_income_2026:,}</span>
+                    <span>103万まで残り: <strong>¥{max(0, rem_103):,}</strong></span>
+                </div>
+            </div>
+
+            <!-- 全期間通算収支 -->
             <div class="all-time-card">
                 <div class="all-time-title">💰 全期間の通算残高（総収支）</div>
                 <div class="all-time-balance">¥{all_time_balance:,}</div>
@@ -732,20 +782,23 @@ def dashboard(month: str | None = None):
                 </div>
             </div>
 
+            <!-- 月別推移グラフ -->
             <div class="chart-card">
-                <div class="chart-title">📊 月別 収支推移（全期間）</div>
+                <div class="chart-title">📊 月別 収支推移（収入 vs 支出）</div>
                 <canvas id="monthlyTrendChart" height="150"></canvas>
             </div>
 
+            <!-- 月ナビゲーション -->
             <div class="month-nav">
                 <a href="/?month={prev_month_str}">◀ 前月</a>
                 <div class="current-month">{year_str}年 {month_str}月</div>
                 <a href="/?month={next_month_str}">翌月 ▶</a>
             </div>
 
+            <!-- 当月サマリーカード -->
             <div class="summary-card">
                 <div class="summary-main">
-                    <div class="summary-main-label">{month_str}月 バイト給料（見込）</div>
+                    <div class="summary-main-label">{month_str}月 バイト給料（見込含む）</div>
                     <div class="summary-main-val">¥{summary["total_income"]:,}</div>
                 </div>
                 <div class="summary-grid">
@@ -760,6 +813,7 @@ def dashboard(month: str | None = None):
                 </div>
             </div>
 
+            <!-- カテゴリ割合円グラフ & リスト -->
             {f'''
             <div class="chart-card">
                 <div class="chart-title">🍩 {month_str}月 支出割合・内訳</div>
@@ -772,10 +826,12 @@ def dashboard(month: str | None = None):
             </div>
             ''' if cat_data else ''}
 
+            <!-- 履歴一覧 -->
             <div class="section-title">登録済みレコード一覧（{len(records)}件）</div>
             {records_html}
         </div>
 
+        <!-- 手入力モーダル -->
         <div class="modal-overlay" id="manualModal">
             <div class="modal-content">
                 <div class="modal-title">
@@ -847,7 +903,7 @@ def dashboard(month: str | None = None):
                 const t = document.getElementById('f_type').value;
                 const cat = document.getElementById('f_category');
                 if (t === 'income') {{
-                    cat.innerHTML = '<option value="バイト">バイト</option><option value="臨時収入">臨時収入</option><option value="給料">給料</option><option value="その他">その他</option>';
+                    cat.innerHTML = '<option value="給料">給料</option><option value="バイト">バイト</option><option value="臨時収入">臨時収入</option><option value="その他">その他</option>';
                 }} else {{
                     cat.innerHTML = `
                         <option value="食費">食費</option>
