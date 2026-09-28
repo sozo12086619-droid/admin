@@ -24,11 +24,11 @@ import db
 
 app = FastAPI()
 
-CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-USER_ID = os.environ.get("APP_USER_ID", "default").strip()
-CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "").strip("[] \t\r\n'\"")
+CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip("[] \t\r\n'\"")
+USER_ID = os.environ.get("APP_USER_ID", "default").strip("[] \t\r\n'\"")
+CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "").strip("[] \t\r\n'\"")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip("[] \t\r\n'\"")
 
 # 起動時にデータベーステーブルの存在確認・作成
 try:
@@ -54,7 +54,7 @@ def get_calendar_service():
         return None
     creds = service_account.Credentials.from_service_account_file(
         CREDENTIALS_PATH,
-        scopes=["[https://www.googleapis.com/auth/calendar](https://www.googleapis.com/auth/calendar)"]
+        scopes=["https://www.googleapis.com/auth/calendar"]
     )
     return build("calendar", "v3", credentials=creds)
 
@@ -158,10 +158,11 @@ def add_event_to_calendar(parsed):
 # 最新の利用可能Geminiモデルを自動検出
 # -------------------------------------------------------------
 def get_best_gemini_model() -> str:
-    if not GEMINI_API_KEY:
+    clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
+    if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
-    list_url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){GEMINI_API_KEY}"
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}".strip("[] \t\r\n'\"")
     try:
         req = urllib.request.Request(list_url, method="GET")
         with urllib.request.urlopen(req, timeout=10) as res:
@@ -170,52 +171,53 @@ def get_best_gemini_model() -> str:
                 m["name"] for m in res_data.get("models", [])
                 if "generateContent" in m.get("supportedGenerationMethods", [])
             ]
-            
             preferred = [
                 "models/gemini-2.5-flash",
                 "models/gemini-2.0-flash",
                 "models/gemini-2.0-flash-exp",
                 "models/gemini-1.5-flash-latest",
                 "models/gemini-1.5-flash",
-                "models/gemini-1.5-pro",
             ]
             for p in preferred:
                 if p in available:
                     return p
-            
             for a in available:
                 if "flash" in a.lower():
                     return a
-            
             if available:
                 return available[0]
     except Exception as e:
-        print(f"ListModels auto-detect warning: {e}")
+        print(f"ListModels Warning: {e}")
 
     return "models/gemini-2.0-flash"
 
 # -------------------------------------------------------------
-# レシート画像解析 (Gemini API)
+# レシート画像解析 (複数枚一括対応)
 # -------------------------------------------------------------
-def analyze_receipt_image(image_bytes: bytes) -> dict:
-    if not GEMINI_API_KEY:
+def analyze_receipt_image(image_bytes: bytes) -> list[dict]:
+    clean_key = GEMINI_API_KEY.strip("[] \t\r\n'\"")
+    if not clean_key:
         raise Exception("Renderの環境変数に GEMINI_API_KEY が設定されていません")
 
     model_name = get_best_gemini_model()
-    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={GEMINI_API_KEY}"
+    target_url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={clean_key}".strip("[] \t\r\n'\"")
+    
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     now_str = datetime.now().strftime("%Y-%m-%d")
 
     prompt = (
-        f"このレシート画像を読み取り、以下のJSON形式のみで出力してください。\n"
-        f"マークダウンの```json等は含めず、純粋なJSON文字列のみを出力してください。\n"
-        f"{{\n"
-        f'  "date": "YYYY-MM-DD形式。レシートに年がない場合は現在の年を補完。不明なら「{now_str}」",\n'
-        f'  "store": "店名（例: セブンイレブン、すき家など）",\n'
-        f'  "amount": 合計金額（支払った税込総額、数値の整数のみ）,\n'
-        f'  "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
-        f'  "detail": "購入した主な品目（カンマ区切りで簡潔に）"\n'
-        f"}}"
+        f"この画像に写っているすべてのレシート（領収書）を読み取り、以下のJSON配列形式のみで出力してください。\n"
+        f"画像内に複数のレシートがある場合は、それぞれを1つの要素として配列に含めてください。\n"
+        f"マークダウンの```json等は含めず、純粋なJSON文字列（配列）のみを出力してください。\n"
+        f"[\n"
+        f"  {{\n"
+        f'    "date": "YYYY-MM-DD形式。レシートに年がない場合は現在の年を補完。不明なら「{now_str}」",\n'
+        f'    "store": "店名（例: ユニオン、セブンイレブンなど）",\n'
+        f'    "amount": 合計金額（支払った税込総額、数値の整数のみ）,\n'
+        f'    "category": "食費" または "日用品" または "交通費" または "交際費" または "趣味・娯楽" または "その他",\n'
+        f'    "detail": "購入した主な品目（カンマ区切りで簡潔に）"\n'
+        f"  }}\n"
+        f"]"
     )
 
     payload = {
@@ -236,7 +238,7 @@ def analyze_receipt_image(image_bytes: bytes) -> dict:
     }
 
     req = urllib.request.Request(
-        url,
+        target_url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST"
@@ -248,7 +250,12 @@ def analyze_receipt_image(image_bytes: bytes) -> dict:
             text = res_data["candidates"][0]["content"]["parts"][0]["text"]
             clean_text = re.sub(r"^```(?:json)?\s*", "", text.strip())
             clean_text = re.sub(r"\s*```$", "", clean_text.strip())
-            return json.loads(clean_text)
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, dict):
+                return [parsed]
+            elif isinstance(parsed, list):
+                return parsed
+            return []
     except urllib.error.HTTPError as he:
         err_msg = he.read().decode("utf-8", errors="ignore")
         raise Exception(f"HTTP {he.code}: {err_msg}")
@@ -464,6 +471,9 @@ def handle_text_message(event):
             )
         )
 
+# -------------------------------------------------------------
+# 画像メッセージ処理（レシート複数枚・一括認識対応）
+# -------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     try:
@@ -471,45 +481,52 @@ def handle_image_message(event):
             blob_client = MessagingApiBlob(api_client)
             image_bytes = blob_client.get_message_content(event.message.id)
     except Exception as e:
-        reply_text = f"画像の取得に失敗しました💦\n{e}"
-        _send_reply(event.reply_token, reply_text)
+        _send_reply(event.reply_token, f"画像の取得に失敗しました💦\n{e}")
         return
 
     try:
-        data = analyze_receipt_image(image_bytes)
+        receipts = analyze_receipt_image(image_bytes)
     except Exception as e:
-        reply_text = f"レシートの読み取りでエラーが出たで💦\n{e}"
-        _send_reply(event.reply_token, reply_text)
+        _send_reply(event.reply_token, f"レシートの読み取りでエラーが出たで💦\n{e}")
         return
 
-    try:
-        rec_date = data.get("date") or datetime.now().strftime("%Y-%m-%d")
-        store = data.get("store") or "不明な店舗"
-        amount = int(data.get("amount") or 0)
-        category = data.get("category") or "その他"
-        detail = data.get("detail") or ""
+    saved_items = []
+    total_amount = 0
 
-        db.insert_money_record(
-            record_date=rec_date,
-            record_type="expense",
-            category=category,
-            title=store,
-            amount=amount,
-            status="confirmed",
-            detail=detail,
-            user_id=USER_ID
-        )
+    for item in receipts:
+        try:
+            rec_date = str(item.get("date") or datetime.now().strftime("%Y-%m-%d")).strip()
+            store = str(item.get("store") or "不明な店舗").strip()
+            amount = int(item.get("amount") or 0)
+            category = str(item.get("category") or "その他").strip()
+            detail = str(item.get("detail") or "").strip()
 
-        reply_text = (
-            f"🧾 レシートを家計簿に記録したで！\n\n"
-            f"・店舗: {store}\n"
-            f"・日付: {rec_date}\n"
-            f"・金額: ¥{amount:,}（{category}）\n"
-            f"・内容: {detail}\n\n"
-            f"家計簿ダッシュボードの支出に即時反映されたで！"
-        )
-    except Exception as e:
-        reply_text = f"読み取りはできましたが保存でエラーが出ました💦\n{e}"
+            if amount > 0:
+                db.insert_money_record(
+                    record_date=rec_date,
+                    record_type="expense",
+                    category=category,
+                    title=store,
+                    amount=amount,
+                    status="confirmed",
+                    detail=detail,
+                    user_id=USER_ID
+                )
+                saved_items.append(f"・{store} ({rec_date})\n  ¥{amount:,}（{category}） {detail}")
+                total_amount += amount
+        except Exception as e:
+            print(f"Item save error: {e}")
+
+    if saved_items:
+        reply_lines = [f"🧾 レシート {len(saved_items)}件 を一括記録したで！", ""]
+        reply_lines.extend(saved_items)
+        if len(saved_items) > 1:
+            reply_lines.append("")
+            reply_lines.append(f"【支出合計】 ¥{total_amount:,}")
+        reply_lines.append("\n家計簿ダッシュボードに即時反映されたで！")
+        reply_text = "\n".join(reply_lines)
+    else:
+        reply_text = "レシートの金額を読み取れんかった💦 もう一度はっきり写して送ってみて！"
 
     _send_reply(event.reply_token, reply_text)
 
