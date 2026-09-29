@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="robots" content="noindex, nofollow">
+  <title>家計簿 · {{ month_label }}</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css?v={{ asset_v }}">
+</head>
+<body>
+
+  <!-- ===== 上部バー：ブランド + 月の切り替え ===== -->
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="/" aria-label="家計簿 トップ">
+        <span class="brand__mark" aria-hidden="true">¥</span>
+        <span class="brand__name">家計簿</span>
+      </a>
+
+      <nav class="month-nav" aria-label="月の切り替え">
+        <a class="icon-btn" href="/?month={{ prev_month }}" aria-label="前の月">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </a>
+        <span class="month-nav__label">{{ month_label }}</span>
+        <a class="icon-btn" href="/?month={{ next_month }}" aria-label="次の月">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </a>
+      </nav>
+
+      {% if not is_current_month %}
+      <a class="chip-btn" href="/">今月へ</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- ===== ヒーロー：今月の収支 ===== -->
+    <section class="hero" aria-labelledby="hero-title">
+      <p class="hero__label" id="hero-title">{{ month_label }}の収支</p>
+      <p class="hero__amount {{ 'is-neg' if balance < 0 else '' }}">{{ balance|yen }}</p>
+      <div class="hero__stats">
+        <div class="hero__stat">
+          <span class="hero__stat-label"><i class="dot dot--up"></i>収入</span>
+          <span class="hero__stat-value">{{ income|yen }}</span>
+        </div>
+        <div class="hero__stat">
+          <span class="hero__stat-label"><i class="dot dot--down"></i>支出</span>
+          <span class="hero__stat-value">{{ expense|yen }}</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 扶養の壁 / 通算残高 ===== -->
+    <div class="grid-2">
+      <section class="card" aria-labelledby="fuyou-title">
+        <div class="card__head">
+          <h2 class="card__title" id="fuyou-title">{{ fuyou.year }}年 収入の累計</h2>
+          <span class="pill pill--{{ fuyou.level }}">{{ fuyou.pct }}%</span>
+        </div>
+        <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ fuyou.pct }}">
+          <div class="meter__bar meter__bar--{{ fuyou.level }}" style="width: {{ fuyou.pct }}%"></div>
+        </div>
+        <div class="kv">
+          <div><span class="kv__k">累計</span><span class="kv__v">{{ fuyou.ytd|yen }}</span></div>
+          {% if fuyou.over > 0 %}
+          <div><span class="kv__k">超過</span><span class="kv__v is-neg">{{ fuyou.over|yen }}</span></div>
+          {% else %}
+          <div><span class="kv__k">残り</span><span class="kv__v">{{ fuyou.remaining|yen }}</span></div>
+          {% endif %}
+        </div>
+        <p class="note">目安の壁：{{ fuyou.limit|yen }}</p>
+      </section>
+
+      <section class="card" aria-labelledby="alltime-title">
+        <div class="card__head">
+          <h2 class="card__title" id="alltime-title">通算残高</h2>
+        </div>
+        <p class="big-number {{ 'is-neg' if all_time.balance < 0 else 'is-pos' }}">{{ all_time.balance|yen }}</p>
+        <div class="kv">
+          <div><span class="kv__k">収入合計</span><span class="kv__v">{{ all_time.income|yen }}</span></div>
+          <div><span class="kv__k">支出合計</span><span class="kv__v">{{ all_time.expense|yen }}</span></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ===== 月別の推移 ===== -->
+    {% if chart_data.trend.labels %}
+    <section class="card" aria-labelledby="trend-title">
+      <div class="card__head">
+        <h2 class="card__title" id="trend-title">月別の推移</h2>
+        <div class="legend">
+          <span><i class="dot dot--up"></i>収入</span>
+          <span><i class="dot dot--down"></i>支出</span>
+        </div>
+      </div>
+      <div class="chart-scroll" id="trendScroll">
+        <div class="chart-inner" style="min-width: {{ [chart_data.trend.labels|length * 64, 320]|max }}px">
+          <canvas id="trendChart" aria-label="月別の収入と支出の棒グラフ" role="img"></canvas>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ===== 支出の内訳 ===== -->
+    {% if categories %}
+    <section class="card" aria-labelledby="cat-title">
+      <div class="card__head">
+        <h2 class="card__title" id="cat-title">{{ month_label }}の支出内訳</h2>
+      </div>
+      <div class="cat-layout">
+        <div class="cat-chart">
+          <canvas id="categoryChart" aria-label="支出カテゴリの割合" role="img"></canvas>
+          <div class="cat-chart__center">
+            <span>支出</span>
+            <strong>{{ expense|yen }}</strong>
+          </div>
+        </div>
+        <ul class="cat-list">
+          {% for c in categories %}
+          <li class="cat-item">
+            <span class="dot" style="background: {{ c.color }}"></span>
+            <span class="cat-item__name">{{ c.name }}</span>
+            <span class="cat-item__pct">{{ c.pct }}%</span>
+            <span class="cat-item__amt">{{ c.amount|yen }}</span>
+            <span class="bar"><i style="width: {{ c.pct }}%; background: {{ c.color }}"></i></span>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ===== 明細（日ごと） ===== -->
+    <section class="card card--flush" aria-labelledby="rec-title">
+      <div class="card__head card__head--pad">
+        <h2 class="card__title" id="rec-title">明細</h2>
+        <span class="muted">{{ record_count }}件</span>
+      </div>
+
+      {% if groups %}
+        {% for g in groups %}
+        <div class="day">
+          <div class="day__head">
+            <span class="day__label">{{ g.label }}{% if g.is_today %}<span class="today-tag">今日</span>{% endif %}</span>
+            <span class="day__net {{ 'is-neg' if g.net < 0 else 'is-pos' }}">{{ g.net|yen(signed=True) }}</span>
+          </div>
+          <ul class="rec-list">
+            {% for r in g.records %}
+            <li class="rec" id="rec-{{ r.id }}">
+              {% if r.is_income %}
+              <span class="badge badge--income">{{ r.badge }}</span>
+              {% else %}
+              <span class="badge" style="color: {{ r.color }}; background: {{ r.color_soft }}">{{ r.badge }}</span>
+              {% endif %}
+              <div class="rec__main">
+                <span class="rec__title">{{ r.title }}</span>
+                {% if r.detail %}<span class="rec__detail">{{ r.detail }}</span>{% endif %}
+              </div>
+              <span class="rec__amount {{ 'is-pos' if r.is_income else 'is-neg' }}">{{ '+' if r.is_income else '-' }}{{ r.amount|yen }}</span>
+              <button class="icon-btn icon-btn--danger" type="button" data-delete="{{ r.id }}" aria-label="「{{ r.title }}」を削除">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>
+              </button>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">
+          <p class="empty__icon" aria-hidden="true">🧾</p>
+          <p class="empty__title">{{ month_label }}の記録はまだありません</p>
+          <p class="muted">LINEに「9/21 セブン 150円」と送るか、右下の＋から追加できます</p>
+        </div>
+      {% endif %}
+    </section>
+
+  </main>
+
+  <!-- ===== 手動追加ボタン ===== -->
+  <button class="fab" id="openSheet" type="button" aria-label="記録を手動で追加">
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <!-- ===== 追加フォーム（ボトムシート） ===== -->
+  <div class="sheet" id="sheet" aria-hidden="true">
+    <div class="sheet__backdrop" data-close></div>
+    <form class="sheet__panel" id="addForm" role="dialog" aria-modal="true" aria-labelledby="sheet-title" novalidate>
+      <div class="sheet__grab" aria-hidden="true"></div>
+      <div class="sheet__head">
+        <h3 id="sheet-title">記録を追加</h3>
+        <button class="icon-btn" type="button" data-close aria-label="閉じる">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="seg" role="radiogroup" aria-label="種別">
+        <label><input type="radio" name="record_type" value="expense" checked><span>支出</span></label>
+        <label><input type="radio" name="record_type" value="income"><span>収入</span></label>
+      </div>
+
+      <label class="field field--amount">
+        <span class="field__label">金額</span>
+        <span class="amount-input"><b>¥</b><input name="amount" inputmode="numeric" autocomplete="off" placeholder="0" required></span>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span class="field__label">日付</span>
+          <input type="date" name="record_date" value="{{ today_iso }}" required>
+        </label>
+        <label class="field">
+          <span class="field__label">カテゴリ</span>
+          <select name="category" id="categorySelect"></select>
+        </label>
+      </div>
+
+      <label class="field">
+        <span class="field__label">内容</span>
+        <input name="title" maxlength="60" placeholder="例：セブン">
+      </label>
+      <label class="field">
+        <span class="field__label">メモ（任意）</span>
+        <input name="detail" maxlength="120">
+      </label>
+
+      <p class="form-error" id="formError" role="alert" hidden></p>
+      <button class="btn-primary" id="submitBtn" type="submit">保存する</button>
+    </form>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- JS に渡すデータ。tojson は < > & を無害化するので、タイトル等に何が入っていても安全 -->
+  <script id="page-data" type="application/json">{{ chart_data | tojson }}</script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="/static/js/dashboard.js?v={{ asset_v }}"></script>
+</body>
+</html>
