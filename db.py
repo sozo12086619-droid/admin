@@ -1,406 +1,244 @@
 """
-db.py — データの保存・読み出しを担当するファイル（Supabase / PostgreSQL）
+db.py — PostgreSQL へのアクセスをここに集約する（SQL はこのファイルにだけ書く）
+
+元コードとの違い
+  - 接続を毎回作らず、コネクションプールで使い回す（画面表示が速くなる）
+  - main.py に直書きされていた集計クエリを、名前つきの関数にした
+  - 月の絞り込みを `record_date::text LIKE '2026-09%'` から日付の範囲指定に変更
+    （意味は同じ。DATE型のまま比較できるのでインデックスも効く）
+  - テーブル定義は元のまま。既存データはそのまま使える
 """
 
-from __future__ import annotations
-
-import json
-import os
+import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime
 
 import psycopg2
 from psycopg2 import pool as pg_pool
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import RealDictCursor
 
-CATEGORIES = ["買い物", "タスク", "予定", "メモ", "出来事", "やりたいこと"]
-STATUSES = ["未着手", "進行中", "完了", "保留"]
+import config
 
-# ---------------------------------------------------------------------------
-# 設定の読み込み
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
 
-def _secret(key: str, default: str | None = None) -> str | None:
-    try:
-        import streamlit as st
-        if key in st.secrets:
-            return str(st.secrets[key])
-    except Exception:
-        pass
-    return os.getenv(key, default)
-
-def _dsn() -> str:
-    url = _secret("SUPABASE_DB_URL") or _secret("DATABASE_URL")
-    if not url:
-        raise RuntimeError(
-            "接続先が設定されてへん。"
-            ".streamlit/secrets.toml か環境変数に SUPABASE_DB_URL を設定してな。"
-        )
-    return url
-
-USER_ID = _secret("APP_USER_ID", "default") or "default"
-
-# ---------------------------------------------------------------------------
-# コネクションプール
-# ---------------------------------------------------------------------------
-
+_MAXCONN = 5
 _pool = None
 _pool_lock = threading.Lock()
+# プールの接続が尽きたとき、エラーにせず順番待ちさせるための整理券
+_slots = threading.BoundedSemaphore(_MAXCONN)
+
+
+# ---------------------------------------------------------------------------
+# 接続まわり
+# ---------------------------------------------------------------------------
 
 def _get_pool():
     global _pool
     with _pool_lock:
         if _pool is None:
-            dsn = _dsn()
-            opts = {
-                "connect_timeout": 10,
-                "application_name": "memo-organizer",
-                "options": "-c statement_timeout=15000",
-            }
-            if "sslmode=" not in dsn:
-                opts["sslmode"] = "require"
-
+            if not config.DATABASE_URL:
+                raise RuntimeError("DATABASE_URL が設定されていません")
+            # sslmode などは元コードと同じく URL の指定にそのまま従う
             _pool = pg_pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=5,
-                dsn=dsn,
-                **opts,
+                1, _MAXCONN, dsn=config.DATABASE_URL, connect_timeout=10
             )
     return _pool
 
-def reset_pool() -> None:
+
+def close_pool() -> None:
     global _pool
     with _pool_lock:
         if _pool is not None:
             try:
                 _pool.closeall()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             _pool = None
 
+
 @contextmanager
 def get_conn():
-    p = _get_pool()
-    conn = p.getconn()
-    broken = False
+    """プールから接続を借り、終わったら返す。
+
+    正常終了なら commit、例外なら rollback。呼び出し側は with で囲むだけでよい。
+    借りた直後に SELECT 1 で生死確認するのは、Render / Supabase 側が
+    放置された接続を切っていることがあるため（切れていたら繋ぎ直す）。
+    """
+    if not _slots.acquire(timeout=20):
+        raise RuntimeError("DB接続の順番待ちがタイムアウトしました")
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        conn.commit()
-    except (psycopg2.OperationalError, psycopg2.InterfaceError):
-        p.putconn(conn, close=True)
+        p = _get_pool()
         conn = p.getconn()
-
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
         try:
-            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.commit()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            p.putconn(conn, close=True)
+            conn = p.getconn()
+
+        broken = False
+        try:
+            yield conn
+            conn.commit()
         except Exception:
-            broken = True
-        raise
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                broken = True
+            raise
+        finally:
+            p.putconn(conn, close=broken)
     finally:
-        # ここを close=broken に修正
-        p.putconn(conn, close=broken)
+        _slots.release()
 
-# ---------------------------------------------------------------------------
-# 小さなヘルパー
-# ---------------------------------------------------------------------------
 
-def query(sql: str, params: tuple | list = ()) -> list[dict]:
+def query(sql, params=None) -> list[dict]:
+    """SELECT 用。結果を dict のリストで返す。"""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
+            cur.execute(sql, params or ())
+            rows = cur.fetchall() if cur.description else []
+            return [dict(r) for r in rows]
 
-def execute(sql: str, params: tuple | list = ()) -> None:
+
+def execute(sql, params=None) -> int:
+    """INSERT / UPDATE / DELETE 用。影響した行数を返す。"""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(sql, params or ())
+            return cur.rowcount
 
-def health_check() -> tuple[bool, str]:
-    try:
-        row = query("SELECT current_database() AS db, version() AS v")[0]
-        return True, f"{row['db']} / {row['v'].split(',')[0]}"
-    except Exception as e:
-        return False, str(e)
-
-def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
 
 # ---------------------------------------------------------------------------
-# テーブル作成
+# テーブル作成（元コードと同じ定義）
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """テーブルが無ければ自動作成する"""
-    ddl = [
-        """
-        CREATE TABLE IF NOT EXISTS public.raw_notes (
-            id          bigserial PRIMARY KEY,
-            user_id     text NOT NULL DEFAULT 'default',
-            created_at  text NOT NULL,
-            body        text NOT NULL,
-            source      text NOT NULL DEFAULT 'manual'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS public.items (
-            id                bigserial PRIMARY KEY,
-            user_id           text NOT NULL DEFAULT 'default',
-            raw_note_id       bigint REFERENCES public.raw_notes(id) ON DELETE SET NULL,
-            created_at        text NOT NULL,
-            updated_at        text NOT NULL,
-            category          text NOT NULL,
-            title             text NOT NULL,
-            detail            text DEFAULT '',
-            tags              text DEFAULT '[]',
-            date_text         text,
-            event_date        text,
-            due_date          text,
-            start_at          text,
-            end_at            text,
-            all_day           integer DEFAULT 1,
-            importance        integer,
-            estimated_minutes integer,
-            priority_score    real,
-            status            text NOT NULL DEFAULT '未着手',
-            calendar_synced   integer NOT NULL DEFAULT 0,
-            ai_model          text,
-            confidence        real
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS public.money_records (
-            id          bigserial PRIMARY KEY,
-            user_id     text NOT NULL DEFAULT 'default',
-            created_at  text NOT NULL,
-            record_date text NOT NULL,
-            record_type text NOT NULL,
-            category    text NOT NULL,
-            title       text NOT NULL,
-            amount      integer NOT NULL,
-            status      text NOT NULL DEFAULT 'confirmed',
-            detail      text DEFAULT '',
-            raw_note_id bigint REFERENCES public.raw_notes(id) ON DELETE SET NULL
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS idx_items_user ON public.items (user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_items_category ON public.items (category)",
-        "CREATE INDEX IF NOT EXISTS idx_raw_notes_user ON public.raw_notes (user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_money_user_date ON public.money_records (user_id, record_date)",
-    ]
     with get_conn() as conn:
         with conn.cursor() as cur:
-            for sql in ddl:
-                cur.execute(sql)
-
-# ---------------------------------------------------------------------------
-# 家計簿・給料関連
-# ---------------------------------------------------------------------------
-
-def insert_money_record(
-    record_date: str,
-    record_type: str,
-    category: str,
-    title: str,
-    amount: int,
-    status: str = "confirmed",
-    detail: str = "",
-    raw_note_id: int | None = None,
-    user_id: str | None = None,
-) -> int:
-    target_user = user_id or USER_ID
-    with get_conn() as conn:
-        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.raw_notes (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    source TEXT DEFAULT 'line',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.money_records (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    record_date DATE NOT NULL,
+                    record_type TEXT NOT NULL,  -- 'income' or 'expense'
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    status TEXT DEFAULT 'confirmed', -- 'expected' or 'confirmed'
+                    detail TEXT,
+                    raw_note_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            # 月別集計を速くするためのインデックス（無ければ作るだけ。害はない）
             cur.execute(
-                """
-                INSERT INTO public.money_records 
-                (user_id, created_at, record_date, record_type, category, title, amount, status, detail, raw_note_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-                """,
-                (target_user, now_iso(), record_date, record_type, category, title, amount, status, detail, raw_note_id),
+                "CREATE INDEX IF NOT EXISTS idx_money_records_user_date "
+                "ON public.money_records (user_id, record_date)"
             )
-            return cur.fetchone()[0]
 
-def fetch_monthly_money_summary(year_month: str, user_id: str | None = None) -> dict:
-    target_user = user_id or USER_ID
-    sql = """
-        SELECT record_type, status, SUM(amount) AS total
-        FROM public.money_records
-        WHERE user_id = %s AND record_date LIKE %s
-        GROUP BY record_type, status
+
+# ---------------------------------------------------------------------------
+# 書き込み
+# ---------------------------------------------------------------------------
+
+def save_raw_note(user_id, body, source="line"):
+    rows = query(
+        "INSERT INTO public.raw_notes (user_id, body, source) VALUES (%s, %s, %s) RETURNING id;",
+        (user_id, body, source),
+    )
+    return rows[0]["id"] if rows else None
+
+
+def insert_money_record(record_date, record_type, category, title, amount,
+                        status="confirmed", detail="", raw_note_id=None, user_id="default"):
+    rows = query(
+        """
+        INSERT INTO public.money_records
+        (user_id, record_date, record_type, category, title, amount, status, detail, raw_note_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id;
+        """,
+        (user_id, record_date, record_type, category, title, amount, status, detail, raw_note_id),
+    )
+    return rows[0]["id"] if rows else None
+
+
+def delete_money_record(record_id: int, user_id: str) -> int:
+    return execute(
+        "DELETE FROM public.money_records WHERE id = %s AND user_id = %s",
+        (record_id, user_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ダッシュボード用の集計
+# ---------------------------------------------------------------------------
+
+def fetch_monthly_totals(user_id: str) -> list[dict]:
+    """月ごとの収入・支出の合計（全期間）。古い月から順。
+
+    通算残高・年の累計収入・当月の収支・推移グラフは、すべてこの1回のクエリから作れる。
     """
-    rows = query(sql, (target_user, f"{year_month}%"))
-    
-    expected_income = 0
-    confirmed_income = 0
-    expenses = 0
-
-    for r in rows:
-        rtype = r["record_type"]
-        status = r["status"]
-        total = int(r["total"] or 0)
-        if rtype == "income":
-            if status == "expected":
-                expected_income += total
-            else:
-                confirmed_income += total
-        elif rtype == "expense":
-            expenses += total
-
-    return {
-        "year_month": year_month,
-        "expected_income": expected_income,
-        "confirmed_income": confirmed_income,
-        "total_income": expected_income + confirmed_income,
-        "expenses": expenses,
-        "balance": (expected_income + confirmed_income) - expenses,
-    }
-
-# ---------------------------------------------------------------------------
-# 既存の保存・取得関数
-# ---------------------------------------------------------------------------
-
-def insert_raw_note(body: str, source: str = "manual", user_id: str | None = None, **kwargs) -> int:
-    target_user = user_id or USER_ID
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO public.raw_notes (user_id, created_at, body, source) "
-                "VALUES (%s, %s, %s, %s) RETURNING id",
-                (target_user, now_iso(), body, source),
-            )
-            return cur.fetchone()[0]
-
-save_raw_note = insert_raw_note
-
-_ITEM_COLUMNS = (
-    "user_id", "raw_note_id", "created_at", "updated_at",
-    "category", "title", "detail", "tags", "date_text",
-    "event_date", "due_date", "start_at", "end_at", "all_day",
-    "importance", "estimated_minutes", "status", "ai_model", "confidence",
-)
-
-def _row_values(it: dict, raw_note_id: int | None, ts: str, ai_model: str, user_id: str = USER_ID) -> tuple:
-    return (
-        user_id,
-        raw_note_id,
-        ts,
-        ts,
-        it.get("category") or "メモ",
-        (str(it.get("title") or "").strip() or "（無題）"),
-        it.get("detail") or "",
-        json.dumps(it.get("tags") or [], ensure_ascii=False),
-        it.get("date_text"),
-        it.get("event_date"),
-        it.get("due_date"),
-        it.get("start_at"),
-        it.get("end_at"),
-        1 if it.get("all_day", 1) else 0,
-        it.get("importance"),
-        it.get("estimated_minutes"),
-        it.get("status") or "未着手",
-        ai_model,
-        it.get("confidence"),
-    )
-
-def insert_items(items: list[dict], raw_note_id: int | None, ai_model: str, user_id: str | None = None, **kwargs) -> int:
-    if not items:
-        return 0
-    target_user = user_id or USER_ID
-    ts = now_iso()
-    rows = [_row_values(it, raw_note_id, ts, ai_model, target_user) for it in items]
-    cols = ", ".join(_ITEM_COLUMNS)
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            execute_values(
-                cur,
-                f"INSERT INTO public.items ({cols}) VALUES %s",
-                rows,
-            )
-    return len(rows)
-
-def fetch_items(categories: list[str] | None = None, statuses: list[str] | None = None, keyword: str = "", order: str = "timeline", descending: bool = True, user_id: str | None = None, **kwargs) -> list[dict]:
-    target_user = user_id or USER_ID
-    sql = "SELECT * FROM public.items WHERE user_id = %s"
-    params: list = [target_user]
-
-    if categories:
-        sql += " AND category = ANY(%s)"
-        params.append(list(categories))
-
-    if statuses:
-        sql += " AND status = ANY(%s)"
-        params.append(list(statuses))
-
-    if keyword:
-        sql += " AND (title ILIKE %s OR detail ILIKE %s)"
-        params.extend([f"%{keyword}%", f"%{keyword}%"])
-
-    direction = "DESC" if descending else "ASC"
-    if order == "timeline":
-        sql += (
-            " ORDER BY (event_date IS NULL) ASC,"
-            f" COALESCE(event_date, substr(created_at, 1, 10)) {direction},"
-            " COALESCE(substr(start_at, 12, 5), '99:99') ASC, id DESC"
-        )
-    else:
-        sql += f" ORDER BY id {direction}"
-
-    return query(sql, params)
-
-def fetch_raw_notes(limit: int = 50, user_id: str | None = None, **kwargs) -> list[dict]:
-    target_user = user_id or USER_ID
     return query(
-        "SELECT * FROM public.raw_notes WHERE user_id = %s ORDER BY id DESC LIMIT %s",
-        (target_user, limit),
+        """
+        SELECT
+            to_char(record_date, 'YYYY-MM') AS ym,
+            COALESCE(SUM(CASE WHEN record_type = 'income'  THEN amount ELSE 0 END), 0) AS inc,
+            COALESCE(SUM(CASE WHEN record_type = 'expense' THEN amount ELSE 0 END), 0) AS exp
+        FROM public.money_records
+        WHERE user_id = %s
+        GROUP BY 1
+        ORDER BY 1 ASC
+        """,
+        (user_id,),
     )
 
-def existing_schedule_keys(user_id: str | None = None, **kwargs) -> set[tuple[str, str]]:
-    target_user = user_id or USER_ID
+
+def fetch_category_breakdown(user_id: str, start, end) -> list[dict]:
+    """[start, end) の期間の支出をカテゴリ別に合計（多い順）。"""
+    return query(
+        """
+        SELECT category, COALESCE(SUM(amount), 0) AS cat_total
+        FROM public.money_records
+        WHERE user_id = %s AND record_type = 'expense'
+          AND record_date >= %s AND record_date < %s
+        GROUP BY category
+        ORDER BY cat_total DESC
+        """,
+        (user_id, start, end),
+    )
+
+
+def fetch_records(user_id: str, start, end) -> list[dict]:
+    """[start, end) の期間の明細（新しい順）。"""
+    return query(
+        """
+        SELECT * FROM public.money_records
+        WHERE user_id = %s AND record_date >= %s AND record_date < %s
+        ORDER BY record_date DESC, id DESC
+        """,
+        (user_id, start, end),
+    )
+
+
+def record_exists(user_id, record_date, title, amount, record_type) -> bool:
     rows = query(
-        "SELECT event_date, start_at FROM public.items "
-        "WHERE user_id = %s AND event_date IS NOT NULL AND start_at IS NOT NULL",
-        (target_user,),
+        """
+        SELECT id FROM public.money_records
+        WHERE user_id = %s AND record_date = %s AND title = %s AND amount = %s AND record_type = %s
+        LIMIT 1
+        """,
+        (user_id, record_date, title, amount, record_type),
     )
-    return {(r["event_date"], r["start_at"]) for r in rows}
-
-def count_by_category(user_id: str | None = None, **kwargs) -> dict[str, int]:
-    target_user = user_id or USER_ID
-    rows = query(
-        "SELECT category, COUNT(*) AS n FROM public.items "
-        "WHERE user_id = %s GROUP BY category",
-        (target_user,),
-    )
-    return {r["category"]: int(r["n"]) for r in rows}
-
-_UPDATABLE = {
-    "category", "title", "detail", "tags", "date_text", "event_date",
-    "due_date", "start_at", "end_at", "all_day", "importance",
-    "estimated_minutes", "priority_score", "status", "calendar_synced",
-}
-
-def update_item(item_id: int, user_id: str | None = None, **fields) -> None:
-    target_user = user_id or USER_ID
-    fields = {k: v for k, v in fields.items() if k in _UPDATABLE}
-    if not fields:
-        return
-
-    fields["updated_at"] = now_iso()
-    assignments = ", ".join(f"{k} = %s" for k in fields)
-    params = list(fields.values()) + [item_id, target_user]
-    execute(
-        f"UPDATE public.items SET {assignments} WHERE id = %s AND user_id = %s",
-        params,
-    )
-
-def delete_item(item_id: int, user_id: str | None = None, **kwargs) -> None:
-    target_user = user_id or USER_ID
-    execute(
-        "DELETE FROM public.items WHERE id = %s AND user_id = %s",
-        (item_id, target_user),
-    )
+    return bool(rows)
