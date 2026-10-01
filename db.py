@@ -1,14 +1,8 @@
 """
-db.py — PostgreSQL へのアクセスをここに集約する（SQL はこのファイルにだけ書く）
-
-元コードとの違い
-  - 接続を毎回作らず、コネクションプールで使い回す（画面表示が速くなる）
-  - main.py に直書きされていた集計クエリを、名前つきの関数にした
-  - 月の絞り込みを `record_date::text LIKE '2026-09%'` から日付の範囲指定に変更
-    （意味は同じ。DATE型のまま比較できるのでインデックスも効く）
-  - テーブル定義は元のまま。既存データはそのまま使える
+db.py — 家計簿アプリ ＆ 初代admin（シフト・予定管理）統合版DBモジュール
 """
 
+import json
 import logging
 import threading
 from contextlib import contextmanager
@@ -21,16 +15,16 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# --- 初代admin用の定数 ---------------------------------------------------
+CATEGORIES = ["買い物", "タスク", "予定", "メモ", "出来事", "やりたいこと"]
+STATUSES = ["未着手", "完了"]
+
+# --- コネクションプール設定 -----------------------------------------------
 _MAXCONN = 5
 _pool = None
 _pool_lock = threading.Lock()
-# プールの接続が尽きたとき、エラーにせず順番待ちさせるための整理券
 _slots = threading.BoundedSemaphore(_MAXCONN)
 
-
-# ---------------------------------------------------------------------------
-# 接続まわり
-# ---------------------------------------------------------------------------
 
 def _get_pool():
     global _pool
@@ -38,7 +32,6 @@ def _get_pool():
         if _pool is None:
             if not config.DATABASE_URL:
                 raise RuntimeError("DATABASE_URL が設定されていません")
-            # sslmode などは元コードと同じく URL の指定にそのまま従う
             _pool = pg_pool.ThreadedConnectionPool(
                 1, _MAXCONN, dsn=config.DATABASE_URL, connect_timeout=10
             )
@@ -51,19 +44,14 @@ def close_pool() -> None:
         if _pool is not None:
             try:
                 _pool.closeall()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             _pool = None
 
 
 @contextmanager
 def get_conn():
-    """プールから接続を借り、終わったら返す。
-
-    正常終了なら commit、例外なら rollback。呼び出し側は with で囲むだけでよい。
-    借りた直後に SELECT 1 で生死確認するのは、Render / Supabase 側が
-    放置された接続を切っていることがあるため（切れていたら繋ぎ直す）。
-    """
+    """プールから接続を借り、終わったら返す。"""
     if not _slots.acquire(timeout=20):
         raise RuntimeError("DB接続の順番待ちがタイムアウトしました")
     try:
@@ -84,7 +72,7 @@ def get_conn():
         except Exception:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 broken = True
             raise
         finally:
@@ -111,45 +99,183 @@ def execute(sql, params=None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# テーブル作成（元コードと同じ定義）
+# テーブル初期化（家計簿用 ＋ 初代admin用）
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # 1. 家計簿・共通 原文ログテーブル
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS public.raw_notes (
                     id SERIAL PRIMARY KEY,
-                    user_id TEXT NOT NULL,
+                    user_id TEXT DEFAULT 'default',
                     body TEXT NOT NULL,
                     source TEXT DEFAULT 'line',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # 2. 家計簿データテーブル
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS public.money_records (
                     id SERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     record_date DATE NOT NULL,
-                    record_type TEXT NOT NULL,  -- 'income' or 'expense'
+                    record_type TEXT NOT NULL,
                     category TEXT NOT NULL,
                     title TEXT NOT NULL,
                     amount INTEGER NOT NULL,
-                    status TEXT DEFAULT 'confirmed', -- 'expected' or 'confirmed'
+                    status TEXT DEFAULT 'confirmed',
                     detail TEXT,
                     raw_note_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # 月別集計を速くするためのインデックス（無ければ作るだけ。害はない）
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_money_records_user_date "
                 "ON public.money_records (user_id, record_date)"
             )
+            # 3. 初代admin（シフト・予定・メモ）用テーブル
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.items (
+                    id SERIAL PRIMARY KEY,
+                    raw_note_id INTEGER,
+                    category TEXT,
+                    title TEXT,
+                    detail TEXT DEFAULT '',
+                    tags TEXT DEFAULT '[]',
+                    event_date DATE,
+                    start_at TEXT,
+                    end_at TEXT,
+                    due_date DATE,
+                    date_text TEXT,
+                    all_day INTEGER DEFAULT 1,
+                    estimated_minutes INTEGER,
+                    importance INTEGER DEFAULT 1,
+                    confidence REAL DEFAULT 1.0,
+                    status TEXT DEFAULT '未着手',
+                    calendar_synced INTEGER DEFAULT 0,
+                    model TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
 
 # ---------------------------------------------------------------------------
-# 書き込み
+# 初代admin（Streamlit）用の関数群
+# ---------------------------------------------------------------------------
+
+def count_by_category() -> dict[str, int]:
+    rows = query("SELECT category, COUNT(*) as cnt FROM public.items GROUP BY category;")
+    return {r["category"]: r["cnt"] for r in rows}
+
+
+def insert_raw_note(body: str, source: str = "web", user_id: str = "default") -> int:
+    rows = query(
+        "INSERT INTO public.raw_notes (user_id, body, source) VALUES (%s, %s, %s) RETURNING id;",
+        (user_id, body, source),
+    )
+    return rows[0]["id"] if rows else None
+
+
+def insert_items(items: list[dict], raw_note_id: int, model: str = "") -> int:
+    count = 0
+    for it in items:
+        tags = it.get("tags", [])
+        tags_str = json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else str(tags or "[]")
+        execute(
+            """
+            INSERT INTO public.items
+            (raw_note_id, category, title, detail, tags, event_date, start_at, end_at,
+             due_date, date_text, all_day, estimated_minutes, importance, confidence, status, calendar_synced, model)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                raw_note_id,
+                it.get("category", "メモ"),
+                it.get("title", ""),
+                it.get("detail", ""),
+                tags_str,
+                it.get("event_date") or None,
+                it.get("start_at") or None,
+                it.get("end_at") or None,
+                it.get("due_date") or None,
+                it.get("date_text", ""),
+                it.get("all_day", 1),
+                it.get("estimated_minutes"),
+                it.get("importance", 1),
+                float(it.get("confidence") or 1.0),
+                it.get("status", "未着手"),
+                it.get("calendar_synced", 0),
+                model,
+            ),
+        )
+        count += 1
+    return count
+
+
+def existing_schedule_keys() -> set[tuple]:
+    rows = query("SELECT event_date::text AS ed, start_at FROM public.items WHERE event_date IS NOT NULL;")
+    return {(r["ed"], r["start_at"]) for r in rows}
+
+
+def fetch_items(sel_cats=None, statuses=None, keyword="", order="timeline", descending=True) -> list[dict]:
+    clauses = []
+    params = []
+    if sel_cats:
+        clauses.append("category = ANY(%s)")
+        params.append(sel_cats)
+    if statuses:
+        clauses.append("status = ANY(%s)")
+        params.append(statuses)
+    if keyword:
+        clauses.append("(title ILIKE %s OR detail ILIKE %s)")
+        params.append(f"%{keyword}%")
+        params.append(f"%{keyword}%")
+
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    if order == "created":
+        order_sql = "ORDER BY id DESC" if descending else "ORDER BY id ASC"
+    else:
+        direction = "DESC" if descending else "ASC"
+        order_sql = f"ORDER BY event_date {direction} NULLS LAST, start_at {direction} NULLS LAST, id {direction}"
+
+    sql = f"""
+        SELECT id, raw_note_id, category, title, detail, tags,
+               event_date::text AS event_date,
+               start_at, end_at,
+               due_date::text AS due_date,
+               date_text, all_day, estimated_minutes, importance, confidence,
+               status, calendar_synced, model, created_at
+        FROM public.items
+        {where_sql}
+        {order_sql};
+    """
+    return query(sql, params)
+
+
+def update_item(item_id: int, **kwargs) -> int:
+    if not kwargs:
+        return 0
+    set_parts = [f"{k} = %s" for k in kwargs.keys()]
+    vals = list(kwargs.values()) + [item_id]
+    return execute(f"UPDATE public.items SET {', '.join(set_parts)} WHERE id = %s", vals)
+
+
+def delete_item(item_id: int) -> int:
+    return execute("DELETE FROM public.items WHERE id = %s", (item_id,))
+
+
+def fetch_raw_notes() -> list[dict]:
+    return query(
+        "SELECT id, body, source, to_char(created_at, 'YYYY-MM-DD HH24:MI') as created_at "
+        "FROM public.raw_notes ORDER BY id DESC LIMIT 100;"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 家計簿アプリ（Render）用の関数群
 # ---------------------------------------------------------------------------
 
 def save_raw_note(user_id, body, source="line"):
@@ -181,15 +307,7 @@ def delete_money_record(record_id: int, user_id: str) -> int:
     )
 
 
-# ---------------------------------------------------------------------------
-# ダッシュボード用の集計
-# ---------------------------------------------------------------------------
-
 def fetch_monthly_totals(user_id: str) -> list[dict]:
-    """月ごとの収入・支出の合計（全期間）。古い月から順。
-
-    通算残高・年の累計収入・当月の収支・推移グラフは、すべてこの1回のクエリから作れる。
-    """
     return query(
         """
         SELECT
@@ -206,7 +324,6 @@ def fetch_monthly_totals(user_id: str) -> list[dict]:
 
 
 def fetch_category_breakdown(user_id: str, start, end) -> list[dict]:
-    """[start, end) の期間の支出をカテゴリ別に合計（多い順）。"""
     return query(
         """
         SELECT category, COALESCE(SUM(amount), 0) AS cat_total
@@ -221,7 +338,6 @@ def fetch_category_breakdown(user_id: str, start, end) -> list[dict]:
 
 
 def fetch_records(user_id: str, start, end) -> list[dict]:
-    """[start, end) の期間の明細（新しい順）。"""
     return query(
         """
         SELECT * FROM public.money_records
