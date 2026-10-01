@@ -178,73 +178,111 @@ DATA = [
     {"date": "2026-09-28", "type": "expense", "category": "日用品", "amount": 1700, "memo": "VISAデビット"},
 ]
 
-def find_col(cols, candidates):
-    for c in candidates:
-        if c in cols:
-            return c
-    return None
-
 def run():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     
     cur.execute("""
-        SELECT table_name, column_name 
+        SELECT table_name, column_name, data_type, is_nullable
         FROM information_schema.columns 
         WHERE table_schema = 'public';
     """)
     rows = cur.fetchall()
-    table_cols = defaultdict(list)
-    for t, c in rows:
-        table_cols[t].append(c)
+    table_cols = defaultdict(dict)
+    for t, c, dt, null in rows:
+        table_cols[t][c] = {"type": dt, "nullable": null}
         
-    print("=== DETECTED DATABASE STRUCTURE ===")
-    for t, cols in table_cols.items():
-        print(f"Table '{t}': {cols}")
-    print("===================================")
+    target_table = "money_records" if "money_records" in table_cols else "records"
+    print(f"Target table: {target_table}")
     
-    ignored = {"raw_notes", "users", "line_users", "user"}
+    cols = table_cols[target_table]
+    print(f"Columns: {list(cols.keys())}")
     
-    # 候補テーブルの探索
-    target_tables = []
-    if "expenses" in table_cols:
-        target_tables.append("expenses")
-    if "incomes" in table_cols:
-        target_tables.append("incomes")
+    # user_id の自動解決
+    user_id_val = None
+    if "user_id" in cols:
+        for ut in ["users", "line_users", "user"]:
+            if ut in table_cols:
+                try:
+                    cur.execute(f"SELECT id FROM {ut} LIMIT 1;")
+                    r = cur.fetchone()
+                    if r:
+                        user_id_val = r[0]
+                        print(f"Using user_id from {ut}: {user_id_val}")
+                        break
+                except Exception:
+                    conn.rollback()
         
-    if not target_tables:
-        for t, cols in table_cols.items():
-            if t in ignored:
-                continue
-            amt = find_col(cols, ["amount", "price", "cost", "value"])
-            if amt:
-                target_tables.append(t)
-                break
-                
-    if not target_tables:
-        raise RuntimeError(f"家計簿テーブルが見つかりませんでした。Tables: {list(table_cols.keys())}")
+        if user_id_val is None and "raw_notes" in table_cols:
+            try:
+                for c in ["user_id", "line_user_id"]:
+                    if c in table_cols["raw_notes"]:
+                        cur.execute(f"SELECT {c} FROM raw_notes WHERE {c} IS NOT NULL LIMIT 1;")
+                        r = cur.fetchone()
+                        if r:
+                            user_id_val = r[0]
+                            print(f"Using user_id from raw_notes: {user_id_val}")
+                            break
+            except Exception:
+                conn.rollback()
+
+        # 外部キー制約の検出
+        cur.execute("""
+            SELECT ccu.table_name, ccu.column_name
+            FROM information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_name = tc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = %s
+              AND kcu.column_name = 'user_id';
+        """, (target_table,))
+        fk = cur.fetchone()
         
-    # テーブル初期化
-    for t in target_tables:
-        cur.execute(f"TRUNCATE TABLE {t} RESTART IDENTITY CASCADE;")
-        
-    inserted = 0
-    # データ挿入
+        if fk:
+            fk_table, fk_col = fk[0], fk[1]
+            try:
+                cur.execute(f"SELECT {fk_col} FROM {fk_table} LIMIT 1;")
+                r = cur.fetchone()
+                if r:
+                    user_id_val = r[0]
+                else:
+                    cur.execute(f"INSERT INTO {fk_table} DEFAULT VALUES RETURNING {fk_col};")
+                    user_id_val = cur.fetchone()[0]
+                    conn.commit()
+            except Exception:
+                conn.rollback()
+
+        if user_id_val is None:
+            uid_type = cols["user_id"]["type"]
+            user_id_val = 1 if "int" in uid_type else "default_user"
+            print(f"Fallback user_id: {user_id_val}")
+
+    # 既存データを初期化
+    cur.execute(f"TRUNCATE TABLE {target_table} RESTART IDENTITY CASCADE;")
+
+    def find_col(candidates):
+        for c in candidates:
+            if c in cols:
+                return c
+        return None
+
+    d_col = find_col(["date", "trans_date", "record_date", "expense_date", "created_at"])
+    a_col = find_col(["amount", "price", "cost", "value"])
+    c_col = find_col(["category", "category_name", "genre"])
+    m_col = find_col(["memo", "description", "note", "title", "content"])
+    t_col = find_col(["type", "transaction_type", "record_type", "category_type", "kind"])
+    s_col = find_col(["status"])
+
+    count = 0
     for row in DATA:
-        if len(target_tables) == 2 and "expenses" in target_tables and "incomes" in target_tables:
-            t = "expenses" if row["type"] == "expense" else "incomes"
-        else:
-            t = target_tables[0]
-            
-        cols = table_cols[t]
-        d_col = find_col(cols, ["date", "trans_date", "expense_date", "created_at", "recorded_at"])
-        a_col = find_col(cols, ["amount", "price", "cost", "value"])
-        c_col = find_col(cols, ["category", "category_name", "genre"])
-        m_col = find_col(cols, ["memo", "description", "note", "title"])
-        t_col = find_col(cols, ["type", "kind"])
-        
         insert_cols = []
         vals = []
+
+        if "user_id" in cols:
+            insert_cols.append("user_id")
+            vals.append(user_id_val)
         if d_col:
             insert_cols.append(d_col)
             vals.append(row["date"])
@@ -260,16 +298,19 @@ def run():
         if t_col:
             insert_cols.append(t_col)
             vals.append(row["type"])
-            
+        if s_col:
+            insert_cols.append(s_col)
+            vals.append("confirmed")
+
         col_str = ", ".join(insert_cols)
         ph = ", ".join(["%s"] * len(vals))
-        cur.execute(f"INSERT INTO {t} ({col_str}) VALUES ({ph});", tuple(vals))
-        inserted += 1
-        
+        cur.execute(f"INSERT INTO {target_table} ({col_str}) VALUES ({ph});", tuple(vals))
+        count += 1
+
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Successfully inserted {inserted} records into {target_tables}!")
+    print(f"Successfully inserted {count} records into {target_table}!")
 
 if __name__ == "__main__":
     run()
