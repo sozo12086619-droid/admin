@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 CATEGORIES = ["買い物", "タスク", "予定", "メモ", "出来事", "やりたいこと"]
 STATUSES = ["未着手", "完了"]
 
-# --- SQLite 設定（初代admin・シフト管理用：設定不要で即座に動く） ----------
+# --- SQLite 設定（初代admin・シフト管理用） ---------------------------------
 SQLITE_PATH = str(Path(config.BASE_DIR) / "admin.db")
 
 
@@ -150,7 +150,7 @@ def init_db() -> None:
         """)
         s_conn.commit()
 
-    # 2. 家計簿用テーブル（PostgreSQL：DATABASE_URL がある環境のみ実行）
+    # 2. 家計簿用テーブル（PostgreSQL）
     if config.DATABASE_URL:
         try:
             with get_conn() as conn:
@@ -355,6 +355,19 @@ def insert_money_record(record_date, record_type, category, title, amount,
         (user_id, record_date, record_type, category, title, amount, status, detail, raw_note_id),
     )
     return rows[0]["id"] if rows else None
+
+
+def update_money_record(record_id: int, user_id: str, record_date, record_type,
+                        category, title, amount, detail="") -> int:
+    """既存レコードの更新"""
+    return execute(
+        """
+        UPDATE public.money_records
+        SET record_date = %s, record_type = %s, category = %s, title = %s, amount = %s, detail = %s
+        WHERE id = %s AND user_id = %s;
+        """,
+        (record_date, record_type, category, title, amount, detail, record_id, user_id),
+    )
 
 
 def delete_money_record(record_id: int, user_id: str) -> int:
