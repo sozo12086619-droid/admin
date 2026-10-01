@@ -1,4 +1,4 @@
-"""routers/dashboard.py — 画面（/）と、手動入力・削除の API"""
+"""routers/dashboard.py — 画面（/）と、手動入力・編集・削除の API"""
 
 import logging
 import time
@@ -44,7 +44,6 @@ def dashboard(request: Request, month: str | None = None):
         context["asset_v"] = _ASSET_VERSION
         return templates.TemplateResponse(request, "dashboard.html", context)
     except Exception:
-        # 元コードは traceback を画面に出していた（内部情報が外から見える）。ログにだけ残す
         logger.exception("ダッシュボードの表示に失敗")
         return HTMLResponse(
             "<h2>読み込みに失敗しました</h2><p>Render のログを確認してください。</p>",
@@ -78,6 +77,27 @@ def add_record(rec: RecordIn):
     except Exception:
         logger.exception("手動入力の保存に失敗")
         return JSONResponse({"status": "error", "message": "保存に失敗しました"}, status_code=500)
+
+
+@router.put("/api/records/{record_id}")
+def update_record(record_id: int, rec: RecordIn):
+    try:
+        updated = db.update_money_record(
+            record_id=record_id,
+            user_id=config.APP_USER_ID,
+            record_date=rec.record_date,
+            record_type=rec.record_type,
+            category=rec.category.strip()[:30] or "その他",
+            title=rec.title.strip()[:100] or "手動入力",
+            amount=rec.amount,
+            detail=rec.detail.strip()[:200],
+        )
+        if not updated:
+            return JSONResponse({"status": "error", "message": "データが見つかりませんでした"}, status_code=404)
+        return {"status": "success", "updated": updated}
+    except Exception:
+        logger.exception("更新に失敗")
+        return JSONResponse({"status": "error", "message": "更新に失敗しました"}, status_code=500)
 
 
 @router.delete("/api/records/{record_id}")
