@@ -1,8 +1,14 @@
 import os
+import sys
+from pathlib import Path
 import psycopg2
-from collections import defaultdict
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# ルートディレクトリの config を読み込めるようにパスを追加
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+import config
+
+DATABASE_URL = config.DATABASE_URL or os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL が設定されていません")
 
@@ -120,7 +126,7 @@ DATA = [
     {"date": "2026-08-31", "type": "expense", "category": "交際費", "amount": 3276, "memo": "交際費"},
     {"date": "2026-08-31", "type": "expense", "category": "その他", "amount": 160, "memo": "その他"},
 
-    # --- 2026年09月（銀行口座・レシート・PayPay） ---
+    # --- 2026年09月 ---
     {"date": "2026-09-01", "type": "expense", "category": "趣味", "amount": 1180, "memo": "Appleサービス(PayPay)"},
     {"date": "2026-09-01", "type": "income", "category": "臨時収入", "amount": 900, "memo": "217さん受取(PayPay)"},
     {"date": "2026-09-02", "type": "expense", "category": "食費", "amount": 935, "memo": "VISAデビット"},
@@ -181,136 +187,35 @@ DATA = [
 def run():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
-    
-    cur.execute("""
-        SELECT table_name, column_name, data_type, is_nullable
-        FROM information_schema.columns 
-        WHERE table_schema = 'public';
-    """)
-    rows = cur.fetchall()
-    table_cols = defaultdict(dict)
-    for t, c, dt, null in rows:
-        table_cols[t][c] = {"type": dt, "nullable": null}
-        
-    target_table = "money_records" if "money_records" in table_cols else "records"
-    print(f"Target table: {target_table}")
-    
-    cols = table_cols[target_table]
-    print(f"Columns: {list(cols.keys())}")
-    
-    # user_id の自動解決
-    user_id_val = None
-    if "user_id" in cols:
-        for ut in ["users", "line_users", "user"]:
-            if ut in table_cols:
-                try:
-                    cur.execute(f"SELECT id FROM {ut} LIMIT 1;")
-                    r = cur.fetchone()
-                    if r:
-                        user_id_val = r[0]
-                        print(f"Using user_id from {ut}: {user_id_val}")
-                        break
-                except Exception:
-                    conn.rollback()
-        
-        if user_id_val is None and "raw_notes" in table_cols:
-            try:
-                for c in ["user_id", "line_user_id"]:
-                    if c in table_cols["raw_notes"]:
-                        cur.execute(f"SELECT {c} FROM raw_notes WHERE {c} IS NOT NULL LIMIT 1;")
-                        r = cur.fetchone()
-                        if r:
-                            user_id_val = r[0]
-                            print(f"Using user_id from raw_notes: {user_id_val}")
-                            break
-            except Exception:
-                conn.rollback()
 
-        # 外部キー制約の検出
-        cur.execute("""
-            SELECT ccu.table_name, ccu.column_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = %s
-              AND kcu.column_name = 'user_id';
-        """, (target_table,))
-        fk = cur.fetchone()
-        
-        if fk:
-            fk_table, fk_col = fk[0], fk[1]
-            try:
-                cur.execute(f"SELECT {fk_col} FROM {fk_table} LIMIT 1;")
-                r = cur.fetchone()
-                if r:
-                    user_id_val = r[0]
-                else:
-                    cur.execute(f"INSERT INTO {fk_table} DEFAULT VALUES RETURNING {fk_col};")
-                    user_id_val = cur.fetchone()[0]
-                    conn.commit()
-            except Exception:
-                conn.rollback()
+    user_id = config.APP_USER_ID
+    print(f"Target user_id: {user_id}")
 
-        if user_id_val is None:
-            uid_type = cols["user_id"]["type"]
-            user_id_val = 1 if "int" in uid_type else "default_user"
-            print(f"Fallback user_id: {user_id_val}")
-
-    # 既存データを初期化
-    cur.execute(f"TRUNCATE TABLE {target_table} RESTART IDENTITY CASCADE;")
-
-    def find_col(candidates):
-        for c in candidates:
-            if c in cols:
-                return c
-        return None
-
-    d_col = find_col(["date", "trans_date", "record_date", "expense_date", "created_at"])
-    a_col = find_col(["amount", "price", "cost", "value"])
-    c_col = find_col(["category", "category_name", "genre"])
-    m_col = find_col(["memo", "description", "note", "title", "content"])
-    t_col = find_col(["type", "transaction_type", "record_type", "category_type", "kind"])
-    s_col = find_col(["status"])
+    # テーブル初期化
+    cur.execute("TRUNCATE TABLE money_records RESTART IDENTITY CASCADE;")
 
     count = 0
+    sql = """
+        INSERT INTO money_records (user_id, record_date, record_type, category, title, amount, status, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+    """
     for row in DATA:
-        insert_cols = []
-        vals = []
-
-        if "user_id" in cols:
-            insert_cols.append("user_id")
-            vals.append(user_id_val)
-        if d_col:
-            insert_cols.append(d_col)
-            vals.append(row["date"])
-        if a_col:
-            insert_cols.append(a_col)
-            vals.append(row["amount"])
-        if c_col:
-            insert_cols.append(c_col)
-            vals.append(row["category"])
-        if m_col:
-            insert_cols.append(m_col)
-            vals.append(row["memo"])
-        if t_col:
-            insert_cols.append(t_col)
-            vals.append(row["type"])
-        if s_col:
-            insert_cols.append(s_col)
-            vals.append("confirmed")
-
-        col_str = ", ".join(insert_cols)
-        ph = ", ".join(["%s"] * len(vals))
-        cur.execute(f"INSERT INTO {target_table} ({col_str}) VALUES ({ph});", tuple(vals))
+        cur.execute(sql, (
+            user_id,
+            row["date"],
+            row["type"],
+            row["category"],
+            row["memo"],
+            row["amount"],
+            "confirmed",
+            ""
+        ))
         count += 1
 
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Successfully inserted {count} records into {target_table}!")
+    print(f"Successfully inserted {count} records into money_records for user '{user_id}'!")
 
 if __name__ == "__main__":
     run()
