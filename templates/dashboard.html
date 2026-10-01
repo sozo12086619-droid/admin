@@ -7,6 +7,15 @@
   <meta name="robots" content="noindex, nofollow">
   <title>家計簿 · {{ month_label }}</title>
   <link rel="stylesheet" href="/static/css/dashboard.css?v={{ asset_v }}">
+  <style>
+    .icon-btn--edit {
+      color: #64748b;
+      margin-right: 4px;
+    }
+    .icon-btn--edit:hover {
+      color: #4f46e5;
+    }
+  </style>
 </head>
 <body>
 
@@ -159,6 +168,24 @@
                 {% if r.detail %}<span class="rec__detail">{{ r.detail }}</span>{% endif %}
               </div>
               <span class="rec__amount {{ 'is-pos' if r.is_income else 'is-neg' }}">{{ '+' if r.is_income else '-' }}{{ r.amount|yen }}</span>
+
+              <!-- 編集ボタン（鉛筆アイコン） -->
+              <button class="icon-btn icon-btn--edit" type="button"
+                data-edit="{{ r.id }}"
+                data-type="{{ 'income' if r.is_income else 'expense' }}"
+                data-amount="{{ r.amount }}"
+                data-date="{{ r.record_date or r.date or g.date or '' }}"
+                data-category="{{ r.category or r.badge }}"
+                data-title="{{ r.title }}"
+                data-detail="{{ r.detail or '' }}"
+                aria-label="「{{ r.title }}」を編集">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+              </button>
+
+              <!-- 削除ボタン（ゴミ箱アイコン） -->
               <button class="icon-btn icon-btn--danger" type="button" data-delete="{{ r.id }}" aria-label="「{{ r.title }}」を削除">
                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>
               </button>
@@ -183,7 +210,7 @@
     <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
   </button>
 
-  <!-- ===== 追加フォーム（ボトムシート） ===== -->
+  <!-- ===== 入力・編集フォーム（ボトムシート） ===== -->
   <div class="sheet" id="sheet" aria-hidden="true">
     <div class="sheet__backdrop" data-close></div>
     <form class="sheet__panel" id="addForm" role="dialog" aria-modal="true" aria-labelledby="sheet-title" novalidate>
@@ -232,9 +259,163 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <!-- JS に渡すデータ。tojson は < > & を無害化するので、タイトル等に何が入っていても安全 -->
+  <!-- JS に渡すデータ -->
   <script id="page-data" type="application/json">{{ chart_data | tojson }}</script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="/static/js/dashboard.js?v={{ asset_v }}"></script>
+
+  <!-- ===== 編集機能のスクリプト ===== -->
+  <script>
+  (function() {
+    const sheet = document.getElementById('sheet');
+    const addForm = document.getElementById('addForm');
+    const sheetTitle = document.getElementById('sheet-title');
+    const submitBtn = document.getElementById('submitBtn');
+    const openSheetBtn = document.getElementById('openSheet');
+    const formError = document.getElementById('formError');
+    let editId = null;
+
+    function resetToCreateMode() {
+      editId = null;
+      if (sheetTitle) sheetTitle.textContent = '記録を追加';
+      if (submitBtn) {
+        submitBtn.textContent = '保存する';
+        submitBtn.disabled = false;
+      }
+      if (formError) { formError.hidden = true; formError.textContent = ''; }
+      if (addForm) {
+        addForm.reset();
+        const expenseRadio = addForm.querySelector('input[name="record_type"][value="expense"]');
+        if (expenseRadio) {
+          expenseRadio.checked = true;
+          expenseRadio.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const dateInput = addForm.querySelector('input[name="record_date"]');
+        if (dateInput) dateInput.value = '{{ today_iso }}';
+      }
+    }
+
+    document.querySelectorAll('[data-close]').forEach(el => {
+      el.addEventListener('click', resetToCreateMode);
+    });
+
+    if (openSheetBtn) {
+      openSheetBtn.addEventListener('click', resetToCreateMode);
+    }
+
+    document.querySelectorAll('[data-edit]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        editId = btn.getAttribute('data-edit');
+        const type = btn.getAttribute('data-type') || 'expense';
+        const amount = btn.getAttribute('data-amount') || '';
+        const date = btn.getAttribute('data-date') || '';
+        const category = btn.getAttribute('data-category') || '';
+        const title = btn.getAttribute('data-title') || '';
+        const detail = btn.getAttribute('data-detail') || '';
+
+        if (openSheetBtn) openSheetBtn.click();
+        if (sheet) {
+          sheet.setAttribute('aria-hidden', 'false');
+          sheet.classList.add('is-open');
+        }
+
+        if (sheetTitle) sheetTitle.textContent = '記録を編集';
+        if (submitBtn) submitBtn.textContent = '更新する';
+        if (formError) { formError.hidden = true; formError.textContent = ''; }
+
+        const radio = addForm.querySelector(`input[name="record_type"][value="${type}"]`);
+        if (radio) {
+          radio.checked = true;
+          radio.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        setTimeout(() => {
+          const catSelect = document.getElementById('categorySelect');
+          if (catSelect && category) {
+            let found = false;
+            for (let opt of catSelect.options) {
+              if (opt.value === category) { found = true; break; }
+            }
+            if (!found) {
+              const opt = document.createElement('option');
+              opt.value = category;
+              opt.textContent = category;
+              catSelect.appendChild(opt);
+            }
+            catSelect.value = category;
+          }
+
+          const amountInput = addForm.querySelector('input[name="amount"]');
+          if (amountInput) amountInput.value = amount;
+
+          const dateInput = addForm.querySelector('input[name="record_date"]');
+          if (dateInput && date) dateInput.value = date;
+
+          const titleInput = addForm.querySelector('input[name="title"]');
+          if (titleInput) titleInput.value = title;
+
+          const detailInput = addForm.querySelector('input[name="detail"]');
+          if (detailInput) detailInput.value = detail;
+        }, 60);
+      });
+    });
+
+    if (addForm) {
+      addForm.addEventListener('submit', async (e) => {
+        if (!editId) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+
+        const amountVal = parseInt((addForm.querySelector('input[name="amount"]')?.value || '0').replace(/[^0-9]/g, ''), 10);
+        const dateVal = addForm.querySelector('input[name="record_date"]')?.value;
+        const typeVal = addForm.querySelector('input[name="record_type"]:checked')?.value || 'expense';
+        const catVal = addForm.querySelector('select[name="category"]')?.value || 'その他';
+        const titleVal = addForm.querySelector('input[name="title"]')?.value || '';
+        const detailVal = addForm.querySelector('input[name="detail"]')?.value || '';
+
+        if (!amountVal || amountVal <= 0) {
+          if (formError) { formError.hidden = false; formError.textContent = '金額を正しく入力してください'; }
+          return;
+        }
+        if (!dateVal) {
+          if (formError) { formError.hidden = false; formError.textContent = '日付を入力してください'; }
+          return;
+        }
+
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '更新中...'; }
+
+        try {
+          const res = await fetch(`/api/records/${editId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              record_date: dateVal,
+              record_type: typeVal,
+              category: catVal,
+              title: titleVal,
+              amount: amountVal,
+              detail: detailVal
+            })
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || '更新に失敗しました');
+          }
+
+          window.location.reload();
+        } catch (err) {
+          if (formError) {
+            formError.hidden = false;
+            formError.textContent = err.message || '更新中にエラーが発生しました';
+          }
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '更新する'; }
+        }
+      }, true);
+    }
+  })();
+  </script>
 </body>
 </html>
