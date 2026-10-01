@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from collections import defaultdict
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
@@ -177,36 +178,98 @@ DATA = [
     {"date": "2026-09-28", "type": "expense", "category": "日用品", "amount": 1700, "memo": "VISAデビット"},
 ]
 
+def find_col(cols, candidates):
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
 def run():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     
-    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public';")
-    tables = [r[0] for r in cur.fetchall()]
-    table_name = "records" if "records" in tables else ("transactions" if "transactions" in tables else tables[0])
-    print(f"Target table: {table_name}")
+    cur.execute("""
+        SELECT table_name, column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'public';
+    """)
+    rows = cur.fetchall()
+    table_cols = defaultdict(list)
+    for t, c in rows:
+        table_cols[t].append(c)
+        
+    print("=== DETECTED DATABASE STRUCTURE ===")
+    for t, cols in table_cols.items():
+        print(f"Table '{t}': {cols}")
+    print("===================================")
     
-    # 既存データを全消去して新しく流し込む
-    cur.execute(f"TRUNCATE TABLE {table_name} RESTART IDENTITY;")
+    ignored = {"raw_notes", "users", "line_users", "user"}
     
-    cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = %s;", (table_name,))
-    cols = [r[0] for r in cur.fetchall()]
-    memo_col = "memo" if "memo" in cols else ("description" if "description" in cols else None)
-    
-    count = 0
+    # 候補テーブルの探索
+    target_tables = []
+    if "expenses" in table_cols:
+        target_tables.append("expenses")
+    if "incomes" in table_cols:
+        target_tables.append("incomes")
+        
+    if not target_tables:
+        for t, cols in table_cols.items():
+            if t in ignored:
+                continue
+            amt = find_col(cols, ["amount", "price", "cost", "value"])
+            if amt:
+                target_tables.append(t)
+                break
+                
+    if not target_tables:
+        raise RuntimeError(f"家計簿テーブルが見つかりませんでした。Tables: {list(table_cols.keys())}")
+        
+    # テーブル初期化
+    for t in target_tables:
+        cur.execute(f"TRUNCATE TABLE {t} RESTART IDENTITY CASCADE;")
+        
+    inserted = 0
+    # データ挿入
     for row in DATA:
-        if memo_col:
-            sql = f"INSERT INTO {table_name} (date, type, category, amount, {memo_col}) VALUES (%s, %s, %s, %s, %s);"
-            cur.execute(sql, (row["date"], row["type"], row["category"], row["amount"], row["memo"]))
+        if len(target_tables) == 2 and "expenses" in target_tables and "incomes" in target_tables:
+            t = "expenses" if row["type"] == "expense" else "incomes"
         else:
-            sql = f"INSERT INTO {table_name} (date, type, category, amount) VALUES (%s, %s, %s, %s);"
-            cur.execute(sql, (row["date"], row["type"], row["category"], row["amount"]))
-        count += 1
+            t = target_tables[0]
+            
+        cols = table_cols[t]
+        d_col = find_col(cols, ["date", "trans_date", "expense_date", "created_at", "recorded_at"])
+        a_col = find_col(cols, ["amount", "price", "cost", "value"])
+        c_col = find_col(cols, ["category", "category_name", "genre"])
+        m_col = find_col(cols, ["memo", "description", "note", "title"])
+        t_col = find_col(cols, ["type", "kind"])
+        
+        insert_cols = []
+        vals = []
+        if d_col:
+            insert_cols.append(d_col)
+            vals.append(row["date"])
+        if a_col:
+            insert_cols.append(a_col)
+            vals.append(row["amount"])
+        if c_col:
+            insert_cols.append(c_col)
+            vals.append(row["category"])
+        if m_col:
+            insert_cols.append(m_col)
+            vals.append(row["memo"])
+        if t_col:
+            insert_cols.append(t_col)
+            vals.append(row["type"])
+            
+        col_str = ", ".join(insert_cols)
+        ph = ", ".join(["%s"] * len(vals))
+        cur.execute(f"INSERT INTO {t} ({col_str}) VALUES ({ph});", tuple(vals))
+        inserted += 1
         
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Successfully inserted {count} records into {table_name}!")
+    print(f"Successfully inserted {inserted} records into {target_tables}!")
 
 if __name__ == "__main__":
     run()
