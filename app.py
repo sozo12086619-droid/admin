@@ -19,15 +19,18 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 import ai
 import calendar_export
 import dateparse
 import db
 import shift
-
-load_dotenv()
 
 st.set_page_config(page_title="admin", page_icon="⚙️", layout="wide")
 db.init_db()
