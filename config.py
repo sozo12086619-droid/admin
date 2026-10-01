@@ -40,9 +40,8 @@ APP_USER_ID = _env("APP_USER_ID", "default") or "default"
 DASHBOARD_USER = _env("DASHBOARD_USER", "me") or "me"
 DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD")
 
-# --- 扶養の壁（元コードは 1030000 固定だった） ------------------------------
-# 制度改正で数字が動くので、環境変数 FUYOU_LIMIT で変えられるようにした。
-FUYOU_LIMIT = max(1, _env_int("FUYOU_LIMIT", 1_030_000))
+# --- 扶養の壁（120万円に変更済み） -----------------------------------------
+FUYOU_LIMIT = max(1, _env_int("FUYOU_LIMIT", 1_200_000))
 
 # --- Google サービスアカウントの鍵ファイル ---------------------------------
 CREDENTIALS_PATH = "/etc/secrets/google-credentials.json"
