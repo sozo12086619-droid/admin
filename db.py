@@ -63,7 +63,6 @@ def close_pool() -> None:
 
 @contextmanager
 def get_conn():
-    """PostgreSQL 用コネクション取得"""
     if not _slots.acquire(timeout=20):
         raise RuntimeError("DB接続の順番待ちがタイムアウトしました")
     try:
@@ -359,7 +358,6 @@ def insert_money_record(record_date, record_type, category, title, amount,
 
 def update_money_record(record_id: int, user_id: str, record_date, record_type,
                         category, title, amount, detail="") -> int:
-    """既存レコードの更新"""
     return execute(
         """
         UPDATE public.money_records
@@ -393,29 +391,49 @@ def fetch_monthly_totals(user_id: str) -> list[dict]:
     )
 
 
-def fetch_category_breakdown(user_id: str, start, end) -> list[dict]:
-    return query(
-        """
+def fetch_category_breakdown(user_id: str, start=None, end=None) -> list[dict]:
+    clauses = ["user_id = %s", "record_type = 'expense'"]
+    params = [user_id]
+    if start:
+        clauses.append("record_date >= %s")
+        params.append(start)
+    if end:
+        clauses.append("record_date < %s")
+        params.append(end)
+
+    sql = f"""
         SELECT category, COALESCE(SUM(amount), 0) AS cat_total
         FROM public.money_records
-        WHERE user_id = %s AND record_type = 'expense'
-          AND record_date >= %s AND record_date < %s
+        WHERE {' AND '.join(clauses)}
         GROUP BY category
         ORDER BY cat_total DESC
-        """,
-        (user_id, start, end),
-    )
+    """
+    return query(sql, params)
+
+
+def fetch_records_filtered(user_id: str, start=None, end=None, category=None) -> list[dict]:
+    clauses = ["user_id = %s"]
+    params = [user_id]
+    if start:
+        clauses.append("record_date >= %s")
+        params.append(start)
+    if end:
+        clauses.append("record_date <= %s")
+        params.append(end)
+    if category and category != "all":
+        clauses.append("category = %s")
+        params.append(category)
+
+    sql = f"""
+        SELECT * FROM public.money_records
+        WHERE {' AND '.join(clauses)}
+        ORDER BY record_date DESC, id DESC
+    """
+    return query(sql, params)
 
 
 def fetch_records(user_id: str, start, end) -> list[dict]:
-    return query(
-        """
-        SELECT * FROM public.money_records
-        WHERE user_id = %s AND record_date >= %s AND record_date < %s
-        ORDER BY record_date DESC, id DESC
-        """,
-        (user_id, start, end),
-    )
+    return fetch_records_filtered(user_id, start=start, end=end)
 
 
 def record_exists(user_id, record_date, title, amount, record_type) -> bool:
