@@ -1,12 +1,9 @@
 """
 message_service.py — LINE のメッセージを受け取って、何をするか決める司令塔
-
-ここは「返信する文面」を返すだけで、LINE への送信自体は行わない
-（送信は routers/line_webhook.py が担当）。そのおかげで、LINE に繋がなくても
-`handle_text_message("9/21 18:00-23:00")` のように単体で動かして確かめられる。
 """
 
 import logging
+import re
 
 import config
 import db
@@ -21,6 +18,80 @@ def _short(e: Exception, limit: int = 80) -> str:
     return str(e).replace("\n", " ")[:limit]
 
 
+def _detect_shift_job(text: str) -> dict:
+    """メッセージ全体または行から、バイト先・対象者・希望かどうかを判定する。"""
+    is_hope = bool(re.search(r"希望|未確定|提出", text))
+
+    if re.search(r"ゴン茶|ゴンチャ|gongcha", text, re.IGNORECASE):
+        return {
+            "name": "ゴン茶",
+            "owner": "girlfriend",
+            "is_hope": is_hope,
+            "color_id": "1" if is_hope else "4",  # 希望: 薄紫 / 確定: ピンク
+            "rate_type": "hourly",
+            "rate": 1023,
+        }
+    elif re.search(r"塾", text):
+        return {
+            "name": "塾",
+            "owner": "girlfriend",
+            "is_hope": is_hope,
+            "color_id": "1" if is_hope else "5",  # 希望: 薄紫 / 確定: 黄色
+            "rate_type": "per_class",
+            "rate": 1500,
+        }
+    elif re.search(r"韓国語|家庭教師", text):
+        return {
+            "name": "韓国語",
+            "owner": "girlfriend",
+            "is_hope": is_hope,
+            "color_id": "1" if is_hope else "6",  # 希望: 薄紫 / 確定: オレンジ
+            "rate_type": "hourly",
+            "rate": 2000,
+        }
+    else:
+        # デフォルトは自分のすき家
+        return {
+            "name": "すき家",
+            "owner": "me",
+            "is_hope": is_hope,
+            "color_id": "8" if is_hope else "7",  # 希望: グレー / 確定: 青
+            "rate_type": "sukiya",
+        }
+
+
+def _calc_salary(shift: dict, job_info: dict, raw_line: str) -> dict:
+    """バイト先に応じた給与・見込みを計算する。"""
+    rate_type = job_info.get("rate_type")
+
+    # 1. 塾（1コマ1500円）
+    if rate_type == "per_class":
+        m = re.search(r"(\d+)\s*コマ", raw_line)
+        if m:
+            classes = int(m.group(1))
+        else:
+            # コマ数指定がない場合は時間（90分=1コマ換算）から推定
+            orig_sal = shift.get("salary", {})
+            total_h = (orig_sal.get("day_hours", 0) or 0) + (orig_sal.get("night_hours", 0) or 0)
+            classes = max(1, round(total_h / 1.5)) if total_h > 0 else 1
+        return {"total_pay": classes * job_info["rate"], "detail": f"{classes}コマ"}
+
+    # 2. ゴン茶（1,023円）/ 韓国語（2,000円）
+    elif rate_type == "hourly":
+        orig_sal = shift.get("salary", {})
+        total_h = (orig_sal.get("day_hours", 0) or 0) + (orig_sal.get("night_hours", 0) or 0)
+        pay = int(round(total_h * job_info["rate"]))
+        return {"total_pay": pay, "detail": f"{total_h:.1f}h"}
+
+    # 3. すき家（既存の深夜増し計算をそのまま利用）
+    else:
+        orig = shift.get("salary", {})
+        pay = orig.get("total_pay", 0)
+        dh = orig.get("day_hours", 0)
+        nh = orig.get("night_hours", 0)
+        return {"total_pay": pay, "detail": f"昼{dh}h/深夜{nh}h"}
+
+
 def handle_text_message(text: str) -> str:
     """テキストの各行を「シフト」「支出」として解釈し、登録結果の返信文を返す。"""
     text = text.strip()
@@ -31,7 +102,10 @@ def handle_text_message(text: str) -> str:
     except Exception:
         logger.exception("raw_notes の保存に失敗")
 
-    shift_count, shift_total = 0, 0
+    # メッセージ全体のキーワードから基本のバイト先・状態を判定
+    global_job = _detect_shift_job(text)
+
+    shift_results = {}  # バイト先ごとに件数と金額をまとめる
     expense_count, expense_total = 0, 0
     errors: list[str] = []
 
@@ -39,8 +113,7 @@ def handle_text_message(text: str) -> str:
         if not line:
             continue
 
-        # ---- シフト ----
-        # 1行の失敗で他の行を巻き込まないよう、行ごとに try で囲む
+        # ---- シフト解析 ----
         try:
             shift = parse_shift_text(line)
         except Exception:
@@ -49,29 +122,49 @@ def handle_text_message(text: str) -> str:
 
         if shift:
             try:
-                # カレンダー → DB の順。カレンダーに載らなかったシフトは DB にも入れない
-                # （元コードと同じ。入れると、直して再送したときに二重登録になる）
+                # 行内にバイト名や「希望」が明記されていれば行単位の判定を優先
+                line_job = _detect_shift_job(line) if any(k in line for k in ["ゴン茶", "ゴンチャ", "塾", "韓国語", "すき家", "希望"]) else global_job
+
+                # カレンダー登録用パラメータの付与
+                status_prefix = "【希望】" if line_job["is_hope"] else ""
+                shift["summary"] = f"{status_prefix}{line_job['name']}"
+                shift["color_id"] = line_job["color_id"]
+
+                # 給与・見込みの計算
+                sal_info = _calc_salary(shift, line_job, line)
+                shift["salary_calc"] = sal_info
+
+                # Googleカレンダーへの登録
                 calendar_service.add_event_to_calendar(shift)
-                salary = shift["salary"]
-                db.insert_money_record(
-                    record_date=shift["record_date"],
-                    record_type="income",
-                    category="バイト",
-                    title=shift["summary"],
-                    amount=salary["total_pay"],
-                    status="expected",
-                    detail=f"{shift['time_str']} (昼{salary['day_hours']}h/深夜{salary['night_hours']}h)",
-                    raw_note_id=raw_id,
-                    user_id=config.APP_USER_ID,
-                )
-                shift_count += 1
-                shift_total += salary["total_pay"]
+
+                # 家計簿（money_records）への登録判定：
+                # 「自分のすき家」かつ「確定シフト（希望ではない）」の時だけ登録する！
+                if line_job["owner"] == "me" and not line_job["is_hope"]:
+                    db.insert_money_record(
+                        record_date=shift["record_date"],
+                        record_type="income",
+                        category="バイト",
+                        title=shift["summary"],
+                        amount=sal_info["total_pay"],
+                        status="expected",
+                        detail=f"{shift.get('time_str', '')} ({sal_info['detail']})",
+                        raw_note_id=raw_id,
+                        user_id=config.APP_USER_ID,
+                    )
+
+                # 結果集計
+                j_key = f"{line_job['name']}{'（希望）' if line_job['is_hope'] else ''}"
+                if j_key not in shift_results:
+                    shift_results[j_key] = {"count": 0, "total": 0, "is_kakeibo": (line_job["owner"] == "me" and not line_job["is_hope"])}
+                shift_results[j_key]["count"] += 1
+                shift_results[j_key]["total"] += sal_info["total_pay"]
+
             except Exception as e:
                 logger.exception("シフト登録に失敗: %r", line)
-                errors.append(f"{shift['date_str']} のシフトを登録できませんでした（{_short(e)}）")
+                errors.append(f"{shift.get('date_str', '指定日')} のシフト登録失敗（{_short(e)}）")
             continue
 
-        # ---- 支出 ----
+        # ---- 支出解析 ----
         try:
             expense = parse_expense_text(line)
         except Exception:
@@ -95,12 +188,17 @@ def handle_text_message(text: str) -> str:
                 logger.exception("支出登録に失敗: %r", line)
                 errors.append(f"「{expense['title']}」を保存できませんでした")
 
+    # 返信メッセージの組み立て
     parts = []
-    if shift_count:
-        parts.append(f"シフト {shift_count}件 登録 (見込¥{shift_total:,})")
+    if shift_results:
+        for j_name, data in shift_results.items():
+            kakeibo_mark = " ➜ 家計簿に反映" if data["is_kakeibo"] else " ➜ カレンダーのみ"
+            parts.append(f"{j_name} {data['count']}件 登録 (見込¥{data['total']:,}){kakeibo_mark}")
+
     if expense_count:
         parts.append(f"支出 {expense_count}件 登録 (計¥{expense_total:,})")
     parts.extend(f"⚠️ {e}" for e in errors)
+
     return "\n".join(parts) if parts else "記録完了！"
 
 
