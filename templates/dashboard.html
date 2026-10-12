@@ -8,6 +8,55 @@
   <title>家計簿 · {{ month_label }}</title>
   <link rel="stylesheet" href="/static/css/dashboard.css?v={{ asset_v }}">
   <style>
+    .filter-section {
+      background: #ffffff;
+      border-radius: 16px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    .filter-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .filter-pill {
+      font-size: 13px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #475569;
+      text-decoration: none;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .filter-pill.is-active {
+      background: #4f46e5;
+      color: #ffffff;
+    }
+    .custom-range-form {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .custom-range-form input[type="date"] {
+      padding: 5px 8px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .custom-range-form button {
+      padding: 6px 14px;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
     .icon-btn--edit {
       color: #64748b;
       margin-right: 4px;
@@ -37,15 +86,41 @@
         </a>
       </nav>
 
-      {% if not is_current_month %}
       <a class="chip-btn" href="/">今月へ</a>
-      {% endif %}
     </div>
   </header>
 
   <main class="container">
 
-    <!-- ===== ヒーロー：今月の収支 ===== -->
+    <!-- ===== 期間 ＆ カテゴリー フィルターバー ===== -->
+    <section class="filter-section">
+      <!-- 期間選択 -->
+      <div class="filter-pills">
+        <a class="filter-pill {{ 'is-active' if not is_custom_filter }}" href="/">今月</a>
+        <a class="filter-pill {{ 'is-active' if current_range == 'this_year' }}" href="/?range=this_year&cat={{ current_cat }}">今年</a>
+        <a class="filter-pill {{ 'is-active' if current_range == 'all' }}" href="/?range=all&cat={{ current_cat }}">全期間</a>
+      </div>
+
+      <!-- カテゴリー選択 -->
+      <div class="filter-pills" style="margin-bottom: 12px; border-top: 1px dashed #e2e8f0; padding-top: 8px;">
+        <span style="font-size: 12px; color: #64748b; line-height: 28px; margin-right: 4px;">費目:</span>
+        <a class="filter-pill {{ 'is-active' if current_cat == 'all' or not current_cat }}" href="/?range={{ current_range }}&start={{ start_date }}&end={{ end_date }}&cat=all">すべて</a>
+        {% for c_name in available_categories %}
+        <a class="filter-pill {{ 'is-active' if current_cat == c_name }}" href="/?range={{ current_range }}&start={{ start_date }}&end={{ end_date }}&cat={{ c_name }}">{{ c_name }}</a>
+        {% endfor %}
+      </div>
+
+      <!-- 日付の直接指定 -->
+      <form class="custom-range-form" method="GET" action="/">
+        <input type="hidden" name="cat" value="{{ current_cat }}">
+        <input type="date" name="start" value="{{ start_date }}" required>
+        <span>〜</span>
+        <input type="date" name="end" value="{{ end_date }}" required>
+        <button type="submit">期間を適用</button>
+      </form>
+    </section>
+
+    <!-- ===== ヒーロー：指定期間の収支 ===== -->
     <section class="hero" aria-labelledby="hero-title">
       <p class="hero__label" id="hero-title">{{ month_label }}の収支</p>
       <p class="hero__amount {{ 'is-neg' if balance < 0 else '' }}">{{ balance|yen }}</p>
@@ -61,7 +136,8 @@
       </div>
     </section>
 
-    <!-- ===== 扶養の壁 / 通算残高 ===== -->
+    <!-- ===== 扶養の壁 / 通算残高（通常月表示時のみ） ===== -->
+    {% if not is_custom_filter %}
     <div class="grid-2">
       <section class="card" aria-labelledby="fuyou-title">
         <div class="card__head">
@@ -93,52 +169,6 @@
         </div>
       </section>
     </div>
-
-    <!-- ===== 月別の推移 ===== -->
-    {% if chart_data.trend.labels %}
-    <section class="card" aria-labelledby="trend-title">
-      <div class="card__head">
-        <h2 class="card__title" id="trend-title">月別の推移</h2>
-        <div class="legend">
-          <span><i class="dot dot--up"></i>収入</span>
-          <span><i class="dot dot--down"></i>支出</span>
-        </div>
-      </div>
-      <div class="chart-scroll" id="trendScroll">
-        <div class="chart-inner" style="min-width: {{ [chart_data.trend.labels|length * 64, 320]|max }}px">
-          <canvas id="trendChart" aria-label="月別の収入と支出の棒グラフ" role="img"></canvas>
-        </div>
-      </div>
-    </section>
-    {% endif %}
-
-    <!-- ===== 支出の内訳 ===== -->
-    {% if categories %}
-    <section class="card" aria-labelledby="cat-title">
-      <div class="card__head">
-        <h2 class="card__title" id="cat-title">{{ month_label }}の支出内訳</h2>
-      </div>
-      <div class="cat-layout">
-        <div class="cat-chart">
-          <canvas id="categoryChart" aria-label="支出カテゴリの割合" role="img"></canvas>
-          <div class="cat-chart__center">
-            <span>支出</span>
-            <strong>{{ expense|yen }}</strong>
-          </div>
-        </div>
-        <ul class="cat-list">
-          {% for c in categories %}
-          <li class="cat-item">
-            <span class="dot" style="background: {{ c.color }}"></span>
-            <span class="cat-item__name">{{ c.name }}</span>
-            <span class="cat-item__pct">{{ c.pct }}%</span>
-            <span class="cat-item__amt">{{ c.amount|yen }}</span>
-            <span class="bar"><i style="width: {{ c.pct }}%; background: {{ c.color }}"></i></span>
-          </li>
-          {% endfor %}
-        </ul>
-      </div>
-    </section>
     {% endif %}
 
     <!-- ===== 明細（日ごと） ===== -->
@@ -174,7 +204,7 @@
                 data-edit="{{ r.id }}"
                 data-type="{{ 'income' if r.is_income else 'expense' }}"
                 data-amount="{{ r.amount }}"
-                data-date="{{ r.record_date or r.date or g.date or '' }}"
+                data-date="{{ r.record_date }}"
                 data-category="{{ r.category or r.badge }}"
                 data-title="{{ r.title }}"
                 data-detail="{{ r.detail or '' }}"
@@ -197,8 +227,8 @@
       {% else %}
         <div class="empty">
           <p class="empty__icon" aria-hidden="true">🧾</p>
-          <p class="empty__title">{{ month_label }}の記録はまだありません</p>
-          <p class="muted">LINEに「9/21 セブン 150円」と送るか、右下の＋から追加できます</p>
+          <p class="empty__title">記録がありません</p>
+          <p class="muted">期間やカテゴリーの条件を変更してみてください</p>
         </div>
       {% endif %}
     </section>
@@ -213,7 +243,8 @@
   <!-- ===== 入力・編集フォーム（ボトムシート） ===== -->
   <div class="sheet" id="sheet" aria-hidden="true">
     <div class="sheet__backdrop" data-close></div>
-    <form class="sheet__panel" id="addForm" role="dialog" aria-modal="true" aria-labelledby="sheet-title" novalidate>
+    <!-- 競合防止のため ID を mainAppForm に変更 -->
+    <form class="sheet__panel" id="mainAppForm" role="dialog" aria-modal="true" aria-labelledby="sheet-title" novalidate>
       <div class="sheet__grab" aria-hidden="true"></div>
       <div class="sheet__head">
         <h3 id="sheet-title">記録を追加</h3>
@@ -239,7 +270,14 @@
         </label>
         <label class="field">
           <span class="field__label">カテゴリ</span>
-          <select name="category" id="categorySelect"></select>
+          <select name="category" id="categorySelect">
+            <option value="食費">食費</option>
+            <option value="日用品">日用品</option>
+            <option value="趣味">趣味</option>
+            <option value="交通費">交通費</option>
+            <option value="給与">給与</option>
+            <option value="その他">その他</option>
+          </select>
         </label>
       </div>
 
@@ -259,50 +297,42 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <!-- JS に渡すデータ -->
   <script id="page-data" type="application/json">{{ chart_data | tojson }}</script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <script src="/static/js/dashboard.js?v={{ asset_v }}"></script>
 
-  <!-- ===== 編集機能のスクリプト ===== -->
+  <!-- ===== 登録・編集・削除の完全統括スクリプト ===== -->
   <script>
   (function() {
     const sheet = document.getElementById('sheet');
-    const addForm = document.getElementById('addForm');
+    const form = document.getElementById('mainAppForm');
     const sheetTitle = document.getElementById('sheet-title');
     const submitBtn = document.getElementById('submitBtn');
     const openSheetBtn = document.getElementById('openSheet');
     const formError = document.getElementById('formError');
     let editId = null;
 
-    function resetToCreateMode() {
+    function openModal() {
+      sheet.setAttribute('aria-hidden', 'false');
+      sheet.classList.add('is-open');
+    }
+
+    function closeModal() {
+      sheet.setAttribute('aria-hidden', 'true');
+      sheet.classList.remove('is-open');
       editId = null;
-      if (sheetTitle) sheetTitle.textContent = '記録を追加';
-      if (submitBtn) {
-        submitBtn.textContent = '保存する';
-        submitBtn.disabled = false;
-      }
+      sheetTitle.textContent = '記録を追加';
+      submitBtn.textContent = '保存する';
+      submitBtn.disabled = false;
       if (formError) { formError.hidden = true; formError.textContent = ''; }
-      if (addForm) {
-        addForm.reset();
-        const expenseRadio = addForm.querySelector('input[name="record_type"][value="expense"]');
-        if (expenseRadio) {
-          expenseRadio.checked = true;
-          expenseRadio.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        const dateInput = addForm.querySelector('input[name="record_date"]');
-        if (dateInput) dateInput.value = '{{ today_iso }}';
-      }
+      form.reset();
+      const dateInput = form.querySelector('input[name="record_date"]');
+      if (dateInput) dateInput.value = '{{ today_iso }}';
     }
 
-    document.querySelectorAll('[data-close]').forEach(el => {
-      el.addEventListener('click', resetToCreateMode);
-    });
+    if (openSheetBtn) openSheetBtn.addEventListener('click', () => { closeModal(); openModal(); });
+    document.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', closeModal));
 
-    if (openSheetBtn) {
-      openSheetBtn.addEventListener('click', resetToCreateMode);
-    }
-
+    // ✏️ 編集ボタンのクリック
     document.querySelectorAll('[data-edit]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -310,111 +340,106 @@
         const type = btn.getAttribute('data-type') || 'expense';
         const amount = btn.getAttribute('data-amount') || '';
         const date = btn.getAttribute('data-date') || '';
-        const category = btn.getAttribute('data-category') || '';
+        const category = btn.getAttribute('data-category') || 'その他';
         const title = btn.getAttribute('data-title') || '';
         const detail = btn.getAttribute('data-detail') || '';
 
-        if (openSheetBtn) openSheetBtn.click();
-        if (sheet) {
-          sheet.setAttribute('aria-hidden', 'false');
-          sheet.classList.add('is-open');
-        }
+        openModal();
+        sheetTitle.textContent = '記録を編集';
+        submitBtn.textContent = '更新する';
 
-        if (sheetTitle) sheetTitle.textContent = '記録を編集';
-        if (submitBtn) submitBtn.textContent = '更新する';
-        if (formError) { formError.hidden = true; formError.textContent = ''; }
+        const radio = form.querySelector(`input[name="record_type"][value="${type}"]`);
+        if (radio) radio.checked = true;
 
-        const radio = addForm.querySelector(`input[name="record_type"][value="${type}"]`);
-        if (radio) {
-          radio.checked = true;
-          radio.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-
-        setTimeout(() => {
-          const catSelect = document.getElementById('categorySelect');
-          if (catSelect && category) {
-            let found = false;
-            for (let opt of catSelect.options) {
-              if (opt.value === category) { found = true; break; }
-            }
-            if (!found) {
-              const opt = document.createElement('option');
-              opt.value = category;
-              opt.textContent = category;
-              catSelect.appendChild(opt);
-            }
-            catSelect.value = category;
+        const catSelect = document.getElementById('categorySelect');
+        if (catSelect) {
+          let found = false;
+          for (let opt of catSelect.options) {
+            if (opt.value === category) { found = true; break; }
           }
+          if (!found) {
+            const opt = document.createElement('option');
+            opt.value = category; opt.textContent = category;
+            catSelect.appendChild(opt);
+          }
+          catSelect.value = category;
+        }
 
-          const amountInput = addForm.querySelector('input[name="amount"]');
-          if (amountInput) amountInput.value = amount;
-
-          const dateInput = addForm.querySelector('input[name="record_date"]');
-          if (dateInput && date) dateInput.value = date;
-
-          const titleInput = addForm.querySelector('input[name="title"]');
-          if (titleInput) titleInput.value = title;
-
-          const detailInput = addForm.querySelector('input[name="detail"]');
-          if (detailInput) detailInput.value = detail;
-        }, 60);
+        form.querySelector('input[name="amount"]').value = amount;
+        form.querySelector('input[name="record_date"]').value = date;
+        form.querySelector('input[name="title"]').value = title;
+        form.querySelector('input[name="detail"]').value = detail;
       });
     });
 
-    if (addForm) {
-      addForm.addEventListener('submit', async (e) => {
-        if (!editId) return;
-
-        e.preventDefault();
-        e.stopImmediatePropagation();
-
-        const amountVal = parseInt((addForm.querySelector('input[name="amount"]')?.value || '0').replace(/[^0-9]/g, ''), 10);
-        const dateVal = addForm.querySelector('input[name="record_date"]')?.value;
-        const typeVal = addForm.querySelector('input[name="record_type"]:checked')?.value || 'expense';
-        const catVal = addForm.querySelector('select[name="category"]')?.value || 'その他';
-        const titleVal = addForm.querySelector('input[name="title"]')?.value || '';
-        const detailVal = addForm.querySelector('input[name="detail"]')?.value || '';
-
-        if (!amountVal || amountVal <= 0) {
-          if (formError) { formError.hidden = false; formError.textContent = '金額を正しく入力してください'; }
-          return;
-        }
-        if (!dateVal) {
-          if (formError) { formError.hidden = false; formError.textContent = '日付を入力してください'; }
-          return;
-        }
-
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '更新中...'; }
-
+    // 🗑 削除ボタン
+    document.querySelectorAll('[data-delete]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-delete');
+        if (!confirm('この記録を削除しますか？')) return;
         try {
-          const res = await fetch(`/api/records/${editId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              record_date: dateVal,
-              record_type: typeVal,
-              category: catVal,
-              title: titleVal,
-              amount: amountVal,
-              detail: detailVal
-            })
-          });
-
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || '更新に失敗しました');
-          }
-
-          window.location.reload();
+          const res = await fetch(`/api/records/${id}`, { method: 'DELETE' });
+          if (res.ok) window.location.reload();
         } catch (err) {
-          if (formError) {
-            formError.hidden = false;
-            formError.textContent = err.message || '更新中にエラーが発生しました';
-          }
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '更新する'; }
+          alert('削除に失敗しました');
         }
-      }, true);
-    }
+      });
+    });
+
+    // 💾 保存・更新送信処理（二重送信を完全防止）
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const amountVal = parseInt((form.querySelector('input[name="amount"]')?.value || '0').replace(/[^0-9]/g, ''), 10);
+      const dateVal = form.querySelector('input[name="record_date"]')?.value;
+      const typeVal = form.querySelector('input[name="record_type"]:checked')?.value || 'expense';
+      const catVal = form.querySelector('select[name="category"]')?.value || 'その他';
+      const titleVal = form.querySelector('input[name="title"]')?.value || '';
+      const detailVal = form.querySelector('input[name="detail"]')?.value || '';
+
+      if (!amountVal || amountVal <= 0) {
+        formError.hidden = false; formError.textContent = '金額を入力してください'; return;
+      }
+      if (!dateVal) {
+        formError.hidden = false; formError.textContent = '日付を入力してください'; return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = editId ? '更新中...' : '保存中...';
+
+      const payload = {
+        record_date: dateVal,
+        record_type: typeVal,
+        category: catVal,
+        title: titleVal,
+        amount: amountVal,
+        detail: detailVal
+      };
+
+      try {
+        const url = editId ? `/api/records/${editId}` : '/api/records';
+        const method = editId ? 'PUT' : 'POST';
+
+        const res = await fetch(url, {
+          method: method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || '通信エラーが発生しました');
+        }
+
+        window.location.reload();
+      } catch (err) {
+        formError.hidden = false;
+        formError.textContent = err.message;
+        submitBtn.disabled = false;
+        submitBtn.textContent = editId ? '更新する' : '保存する';
+      }
+    });
   })();
   </script>
 </body>
